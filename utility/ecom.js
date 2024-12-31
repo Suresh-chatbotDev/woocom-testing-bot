@@ -8,6 +8,7 @@ const { URLSearchParams } = require('url');
 dotenv.config();
 
 const access_token = process.env.meta_access_token;
+const META_API_URL = "https://graph.facebook.com/v21.0/470839449443810/messages";
 const MONGO_URL = process.env.MONGO_URL;
 const phone_number_id = '470839449443810';
 const wc_url = process.env.wc_url;
@@ -140,9 +141,14 @@ async function enter_order_id(recipient_id) {
 }
 
 async function fetch_order_status(order_id, recipient_id) {
+    console.log(`\n==== Fetching Order Status for Order #${order_id} ====`);
+    
+    // Construct WooCommerce API URL
     const wc_api_url = `${wc_url}/orders/${order_id}`;
+    console.log('WooCommerce API URL:', wc_api_url);
 
     try {
+        // Fetch order details from WooCommerce
         const response = await axios.get(wc_api_url, {
             auth: {
                 username: wc_user,
@@ -152,49 +158,100 @@ async function fetch_order_status(order_id, recipient_id) {
 
         if (response.status === 200) {
             const order_data = response.data;
-            const order_status = order_data.status.capitalize();
-            const order_date = new Date(order_data.date_created).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+            console.log('Order data retrieved successfully');
+
+            // Format order information
+            const order_status = order_data.status.charAt(0).toUpperCase() + order_data.status.slice(1);
+            const order_date = new Date(order_data.date_created).toLocaleDateString('en-GB', { 
+                day: '2-digit', 
+                month: 'short', 
+                year: 'numeric' 
+            });
             const total_amount = order_data.total;
             const currency_symbol = order_data.currency_symbol || '₹';
             const billing = order_data.billing || {};
             const customer_name = billing.first_name || 'Customer';
-            const delivery_address = `${billing.address_1}, ${billing.city}, ${billing.state}, ${billing.postcode}, ${billing.country}`;
-            const line_items = order_data.line_items || [];
-            let items_text = "";
+            
+            // Construct delivery address with null checks
+            const address_parts = [
+                billing.address_1,
+                billing.city,
+                billing.state,
+                billing.postcode,
+                billing.country
+            ].filter(Boolean); // Remove any null/undefined values
+            const delivery_address = address_parts.join(', ');
 
-            line_items.forEach(item => {
-                items_text += `- ${item.name} (Qty: ${item.quantity}): ${currency_symbol}${item.total}\n`;
+            // Format line items
+            const line_items = order_data.line_items || [];
+            const items_text = line_items.map(item => 
+                `- ${item.name} (Qty: ${item.quantity}): ${currency_symbol}${item.total}`
+            ).join('\n');
+
+            // Construct WhatsApp message
+            const message_text = `📦 *Order Update*\n\n` +
+                `Hello ${customer_name},\n` +
+                `Here are your order details:\n` +
+                `- *Order ID*: #${order_id}\n` +
+                `- *Order Date*: ${order_date}\n` +
+                `- *Status*: ${order_status}\n` +
+                `- *Total Amount*: ${currency_symbol}${total_amount}\n\n` +
+                `🛒 *Items Ordered:*\n${items_text}\n\n` +
+                `📍 *Delivery Address*:\n${delivery_address}\n\n` +
+                `Thank you for your purchase!`;
+
+            // Send WhatsApp message
+            const whatsapp_response = await axios.post(META_API_URL, {
+                messaging_product: "whatsapp",
+                to: recipient_id,
+                type: "text",
+                text: { body: message_text }
+            }, {
+                headers: {
+                    "Authorization": `Bearer ${access_token}`,
+                    "Content-Type": "application/json"
+                }
             });
 
-            const message_text = `📦 *Order Update*\n\nHello ${customer_name},\nHere are your order details:\n- *Order ID*: #${order_id}\n- *Order Date*: ${order_date}\n- *Status*: ${order_status}\n- *Total Amount*: ${currency_symbol}${total_amount}\n\n🛒 *Items Ordered:*\n${items_text}\n*Delivery Address*: ${delivery_address}\n\nThank you for your purchase!`;
-
-            const whatsapp_url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
-            const headers = {
-                "Authorization": `Bearer ${access_token}`,
-                "Content-Type": "application/json"
-            };
-            const payload = {
-                "messaging_product": "whatsapp",
-                "to": recipient_id,
-                "type": "text",
-                "text": {
-                    "body": message_text
-                }
+            console.log('WhatsApp message sent successfully');
+            return { 
+                success: true, 
+                message: "Order status message sent successfully." 
             };
 
-            const whatsapp_response = await axios.post(whatsapp_url, payload, { headers });
-
-            if (whatsapp_response.status === 200) {
-                return { success: true, message: "Order status message sent successfully." };
-            } else {
-                return { success: false, error: whatsapp_response.data };
-            }
         } else {
-            return { success: false, error: "Failed to fetch order status from WooCommerce" };
+            throw new Error(`Unexpected response status: ${response.status}`);
         }
     } catch (error) {
-        console.error('Error fetching order status:', error);
-        return { success: false, error: 'Failed to fetch order status' };
+        console.error('Error in fetch_order_status:', {
+            message: error.message,
+            response: error.response?.data,
+            orderId: order_id
+        });
+
+        // Send error message to user
+        try {
+            await axios.post(META_API_URL, {
+                messaging_product: "whatsapp",
+                to: recipient_id,
+                type: "text",
+                text: { 
+                    body: `Sorry, we couldn't find order #${order_id}. Please check the order number and try again.` 
+                }
+            }, {
+                headers: {
+                    "Authorization": `Bearer ${access_token}`,
+                    "Content-Type": "application/json"
+                }
+            });
+        } catch (msgError) {
+            console.error('Error sending error message:', msgError);
+        }
+
+        return { 
+            success: false, 
+            error: 'Failed to fetch order status' 
+        };
     }
 }
 
@@ -609,105 +666,114 @@ async function order_confirmation(phone, first_name, total_amount, status, order
 }
 
 async function create_woocommerce_order(recipient_id) {
-    await initializeDb();  // Ensure DB is initialized before using collection
-    
-    if (!collection) {
-        console.error('MongoDB collection is not initialized.');
-        return; // Exiting if collection is not initialized
-    }
-    console.log('----------- MongoDB collection initialized-------------:'); // Log collection to confirm it's initialized
-
-    const order_items = fetch_user_data(recipient_id, 'order_info');
-    const shipping_info = fetch_user_data(recipient_id, 'shipping_addresses');
-    const payments_info = fetch_user_data(recipient_id, 'Payments Info');
-
-    const transaction_id = payments_info ? payments_info.transaction_id : "";
-    const transaction_status = payments_info ? payments_info.transaction_status : "";
-    const payment_method = payments_info ? payments_info.payment_method : "";
-
-    const shipping_defaults = {
-        name: "",
-        phone_number: recipient_id,
-        address: "",
-        city: "",
-        state: "State not found",
-        in_pin_code: "",
-        house_number: "",
-        tower_number: "",
-        building_name: "",
-        landmark_area: ""
-    };
-
-    if (shipping_info) {
-        for (const shipping of shipping_info) {
-            shipping_defaults.name = shipping.name || shipping_defaults.name;
-            shipping_defaults.address = shipping.address || shipping_defaults.address;
-            shipping_defaults.city = shipping.city || shipping_defaults.city;
-            shipping_defaults.state = shipping.state || shipping_defaults.state;
-            shipping_defaults.in_pin_code = shipping.in_pin_code || shipping_defaults.in_pin_code;
-            shipping_defaults.house_number = shipping.house_number || shipping_defaults.house_number;
-            shipping_defaults.tower_number = shipping.tower_number || shipping_defaults.tower_number;
-            shipping_defaults.building_name = shipping.building_name || shipping_defaults.building_name;
-            shipping_defaults.landmark_area = shipping.landmark_area || shipping_defaults.landmark_area;
-        }
-    }
-
-    const line_items = order_items.map(item => ({
-        product_id: item.product_retailer_id.split('_').pop(),
-        quantity: item.quantity
-    }));
-
-    const order_data = {
-        payment_method: payment_method, // Ensure this field is correct
-        payment_method_title: transaction_status, // Ensure this field is correct
-        set_paid: true,
-        billing: {
-            first_name: shipping_defaults.name,
-            address_1: shipping_defaults.address,
-            city: shipping_defaults.city,
-            state: shipping_defaults.state,
-            postcode: String(shipping_defaults.in_pin_code),
-            country: 'IN',
-            phone: shipping_defaults.phone_number,
-            house_number: shipping_defaults.house_number,
-            tower_number: shipping_defaults.tower_number,
-            building_name: shipping_defaults.building_name,
-            landmark_area: shipping_defaults.landmark_area
-        },
-        shipping: {
-            first_name: shipping_defaults.name,
-            address_1: shipping_defaults.address,
-            city: shipping_defaults.city,
-            state: shipping_defaults.state,
-            postcode: String(shipping_defaults.in_pin_code),
-            country: 'IN',
-            phone: shipping_defaults.phone_number,
-            house_number: shipping_defaults.house_number,
-            tower_number: shipping_defaults.tower_number,
-            building_name: shipping_defaults.building_name,
-            landmark_area: shipping_defaults.landmark_area
-        },
-        line_items: line_items, // Ensure line items are correctly formatted
-    };
-    console.log("--------> from createWoocommerceOrder function : Order Data:", order_data);
-
-    await update_mongo_user_data(collection, recipient_id);
-
+    console.log("\n==== WooCommerce Order Creation Started ====");
     try {
-        const response = await axios.post(wc_url, order_data, {
+        await initializeDb();
+        
+        if (!collection) {
+            throw new Error('MongoDB collection is not initialized.');
+        }
+
+        // Fetch all required data
+        const order_items = await fetch_user_data(recipient_id, 'order_info');
+        const shipping_info = await fetch_user_data(recipient_id, 'shipping_addresses');
+        const payments_info = await fetch_user_data(recipient_id, 'Payments Info');
+
+        // Initialize shipping defaults
+        const shipping_defaults = {
+            name: "",
+            phone_number: recipient_id,
+            address: "",
+            city: "",
+            state: "State not found",
+            in_pin_code: "",
+            house_number: "",
+            tower_number: "",
+            building_name: "",
+            landmark_area: ""
+        };
+
+        // Update shipping defaults with actual data if available
+        if (shipping_info && shipping_info.length > 0) {
+            Object.assign(shipping_defaults, shipping_info[0]);
+        }
+
+        // Format line items
+        const line_items = order_items.map(item => ({
+            product_id: parseInt(item.product_retailer_id.split('_').pop()),
+            quantity: parseInt(item.quantity)
+        }));
+
+        // Construct order data
+        const order_data = {
+            payment_method: payments_info?.payment_method || 'upi',
+            payment_method_title: payments_info?.transaction_status || 'Paid',
+            set_paid: true,
+            billing: {
+                first_name: shipping_defaults.name,
+                address_1: shipping_defaults.address,
+                city: shipping_defaults.city,
+                state: shipping_defaults.state,
+                postcode: String(shipping_defaults.in_pin_code),
+                country: 'IN',
+                phone: shipping_defaults.phone_number,
+                house_number: shipping_defaults.house_number,
+                tower_number: shipping_defaults.tower_number,
+                building_name: shipping_defaults.building_name,
+                landmark_area: shipping_defaults.landmark_area
+            },
+            shipping: {
+                first_name: shipping_defaults.name,
+                address_1: shipping_defaults.address,
+                city: shipping_defaults.city,
+                state: shipping_defaults.state,
+                postcode: String(shipping_defaults.in_pin_code),
+                country: 'IN',
+                phone: shipping_defaults.phone_number,
+                house_number: shipping_defaults.house_number,
+                tower_number: shipping_defaults.tower_number,
+                building_name: shipping_defaults.building_name,
+                landmark_area: shipping_defaults.landmark_area
+            },
+            line_items: line_items
+        };
+
+        // Construct proper WooCommerce orders endpoint
+        const ordersEndpoint = `${wc_url}/orders`;
+        console.log('WooCommerce Orders Endpoint:', ordersEndpoint);
+        console.log('Order Data:', JSON.stringify(order_data, null, 2));
+
+        // Update MongoDB
+        await update_mongo_user_data(collection, recipient_id);
+
+        // Make the API call
+        const response = await axios.post(ordersEndpoint, order_data, {
             auth: {
                 username: wc_user,
                 password: wc_pass
+            },
+            headers: {
+                'Content-Type': 'application/json'
             }
+        });
+
+        console.log('WooCommerce Response:', {
+            status: response.status,
+            orderId: response.data?.id
         });
 
         if (response.status === 201) {
             return response.data;
-        } else {
-            return null;
         }
+
+        throw new Error(`Order creation failed with status ${response.status}`);
+
     } catch (error) {
-        console.error('Error creating WooCommerce order:', error);
+        console.error('Error creating WooCommerce order:', {
+            message: error.message,
+            url: error.config?.url,
+            response: error.response?.data
+        });
         return null;
     }
 }

@@ -164,25 +164,22 @@ app.post('/webhook', async (req, res) => {
                     }
                 }
 
+                // In your webhook POST handler, for payment success:
                 if (value.statuses) {
                     const statuses = value.statuses;
                     for (const status of statuses) {
-                        if (status.type === 'payment') {
-                            const recipient_id = status.recipient_id || "unknown";
+                        if (status.type === 'payment' && 
+                            status.payment?.transaction?.status === 'success') {
+                            
+                            const recipient_id = status.recipient_id;
                             const payment_info = {
-                                payment_status: status.status || 'unknown',
-                                reference_id: status.payment?.reference_id || '',
-                                amount: `${Math.floor(status.payment?.amount?.value / 100) || 0} ${status.payment?.currency || ''}`,
-                                transaction_id: status.payment?.transaction?.id || '',
-                                transaction_status: status.payment?.transaction?.status || '',
-                                payment_method: status.payment?.transaction?.method?.type || 'unknown'
+                                payment_status: status.status,
+                                transaction_id: status.payment?.transaction?.id,
+                                payment_method: status.payment?.transaction?.method?.type
                             };
-                            console.log(`Payment info: ${JSON.stringify(payment_info)}`);
+                            
                             await store_user_data(recipient_id, 'Payments Info', payment_info);
-
-                            if (payment_info.transaction_status === 'success') {
-                                return res.json(await create_woocommerce_order(recipient_id));
-                            }
+                            return res.json(await create_woocommerce_order(recipient_id));
                         }
                     }
                 }
@@ -200,77 +197,62 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.post('/order_status', async (req, res) => {
-    console.log("\n=== WOOCOMMERCE ORDER WEBHOOK RECEIVED ===");
-    console.log("Timestamp:", new Date().toISOString());
+    console.log("\n=== WooCommerce Webhook Received ===");
     console.log("Headers:", req.headers);
-    console.log("Body:", JSON.stringify(req.body, null, 2));
-
+    console.log("Webhook Data:", JSON.stringify(req.body, null, 2));
+    
     try {
-        // Validate webhook payload
-        if (!req.body || !req.body.id) {
-            console.error("Invalid webhook payload - missing order ID");
-            return res.status(400).json({
-                status: 'error',
-                message: 'Invalid webhook payload - missing order ID'
-            });
-        }
-
         const data = req.body;
         
-        // Extract order details
-        const orderDetails = {
-            order_id: data.id,
-            billing_info: data.billing || {},
-            phone: data.billing?.phone || '',
-            total_amount: data.total || '0.00',
-            first_name: data.billing?.first_name || 'Customer',
-            status: data.status || "processing"
-        };
-
-        console.log("Processing Order Details:", orderDetails);
-
-        // Validate required fields
-        if (!orderDetails.phone || !orderDetails.first_name) {
-            console.error("Missing required order details");
-            return res.status(400).json({
-                status: 'error',
-                message: 'Missing required order details (phone or name)'
+        if (!data) {
+            console.log("No webhook data received");
+            return res.status(400).json({ 
+                status: 'error', 
+                message: 'No data received' 
             });
         }
 
-        // Send order confirmation
-        const confirmationResult = await order_confirmation(
-            orderDetails.phone,
-            orderDetails.first_name,
-            orderDetails.total_amount,
-            orderDetails.status,
-            orderDetails.order_id
-        );
+        // Extract phone number from meta_data if available, otherwise use billing phone
+        let phone = data.meta_data?.find(meta => meta.key === 'whatsapp_number')?.value 
+            || data.billing?.phone 
+            || '';
 
-        console.log("Order Confirmation Result:", confirmationResult);
-
-        if (confirmationResult.success) {
-            console.log(`✅ Order ${orderDetails.order_id} processed successfully`);
-            return res.status(200).json({
-                status: 'success',
-                message: `Order ${orderDetails.order_id} processed successfully`,
-                details: orderDetails
-            });
-        } else {
-            console.error(`❌ Failed to process order ${orderDetails.order_id}`);
-            return res.status(500).json({
-                status: 'error',
-                message: 'Failed to send order confirmation',
-                error: confirmationResult.error
-            });
+        // Ensure phone number starts with country code
+        if (phone && !phone.startsWith('91')) {
+            phone = '91' + phone;
         }
+
+        let status = data.status;
+        // Map status if needed
+        if (status === 'arrival-shipment') {
+            status = 'shipped';
+        }
+
+        // Only proceed with order confirmation if we have the necessary data
+        if (phone && data.id) {
+            const result = await order_confirmation(
+                phone,
+                data.billing?.first_name || 'Customer',
+                data.total || '0.00',
+                status || 'processing',
+                data.id
+            );
+
+            console.log('Order confirmation result:', result);
+        }
+
+        // Always return 200 to acknowledge webhook receipt
+        return res.status(200).json({
+            status: 'success',
+            message: 'Webhook processed'
+        });
 
     } catch (error) {
-        console.error("Webhook Processing Error:", error);
-        return res.status(500).json({
-            status: 'error',
-            message: 'Internal server error',
-            error: error.message
+        console.error('Webhook processing error:', error);
+        // Still return 200 to acknowledge receipt
+        return res.status(200).json({
+            status: 'warning',
+            message: 'Webhook received but processing failed'
         });
     }
 });
