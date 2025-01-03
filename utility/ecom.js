@@ -404,7 +404,7 @@ async function address(recipient_id, shipping_addresses) {
 
     const shipping_info = [address_info];
     await store_user_data(recipient_id, 'shipping_addresses', shipping_info);
-    return payment_request(recipient_id, shipping_info);
+    return await payment_request(recipient_id, shipping_info);
 }
 
 function generate_reference_id() {
