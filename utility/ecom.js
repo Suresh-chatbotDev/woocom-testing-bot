@@ -389,38 +389,110 @@ async function pincode(recipient_id) {
 }
 
 async function address(recipient_id, shipping_addresses) {
-    const address_info = {
-        name: shipping_addresses.name || "",
-        phone_number: recipient_id,
-        address: shipping_addresses.address || "",
-        city: shipping_addresses.city || "",
-        state: shipping_addresses.state || "",
-        in_pin_code: shipping_addresses.in_pin_code || "",
-        house_number: shipping_addresses.house_number || "",
-        tower_number: shipping_addresses.tower_number || "",
-        building_name: shipping_addresses.building_name || "",
-        landmark_area: shipping_addresses.landmark_area || ""
-    };
+    try {
+        if (!collection) {
+            await initializeDb();
+        }   
 
-    const shipping_info = [address_info];
-    await store_user_data(recipient_id, 'shipping_addresses', shipping_info);
-    return await payment_request(recipient_id, shipping_info);
+        // Get current addresses from database
+        const document = await collection.findOne({ recipient_id });
+        let current_addresses = document?.shipping_addresses || [];
+        
+        // Create new address info
+        const address_info = {
+            name: shipping_addresses.name || "",
+            phone_number: recipient_id,
+            address: shipping_addresses.address || "",
+            city: shipping_addresses.city || "",
+            state: shipping_addresses.state || "",
+            in_pin_code: shipping_addresses.in_pin_code || "",
+            house_number: shipping_addresses.house_number || "",
+            tower_number: shipping_addresses.tower_number || "",
+            building_name: shipping_addresses.building_name || "",
+            landmark_area: shipping_addresses.landmark_area || ""
+        };
+
+        // Check for duplicate address
+        const isDuplicate = current_addresses.some(addr => 
+            addr.address === address_info.address &&
+            addr.in_pin_code === address_info.in_pin_code &&
+            addr.city === address_info.city
+        );
+
+        if (isDuplicate) {
+            console.log("Duplicate address found, using existing address");
+            return await payment_request(recipient_id, [shipping_addresses]);
+        }
+
+        // Check address limit and remove duplicates
+        if (current_addresses.length >= 3) {
+            current_addresses.shift(); // Remove oldest address
+        }
+
+        // Add new address
+        current_addresses.push(address_info);
+
+        // Update MongoDB with new address
+        await collection.updateOne(
+            { recipient_id },
+            { 
+                $set: { 
+                    shipping_addresses: current_addresses,
+                    selected_address: address_info // Store the new address as selected
+                }
+            },
+            { upsert: true }
+        );
+
+        console.log(`Stored address for ${recipient_id}. Total addresses: ${current_addresses.length}`);
+        return await payment_request(recipient_id, [address_info]);
+    } catch (error) {
+        console.error('Error in address function:', error);
+        throw new Error(`Address processing failed: ${error.message}`);
+    }
 }
 
-function generate_reference_id() {
-    const prefix = "skygoal";
-    const unique_number = Math.floor(Math.random() * 1000000) + 100;
-    return `${prefix}-${unique_number}`;
-}
+async function payment_request(recipient_id, current_address) {
+    try {
+        if (!collection) {
+            await initializeDb();
+        }
 
-async function payment_request(recipient_id, shipping_addresses) {
-    const expiration_timestamp = Math.floor(Date.now() / 1000) + 600;
-    const reference_id = generate_reference_id();
-    await store_user_data(recipient_id, 'reference_id', reference_id);
-    const order_items = await fetch_user_data(recipient_id, 'order_info');
-    
-    let total_amount = 0;
-    const items = [];
+        // Get all addresses from DB
+        const document = await collection.findOne({ recipient_id });
+        const all_addresses = document?.shipping_addresses || [];
+        
+        // Get only the last 3 addresses for display
+        const recent_addresses = all_addresses.slice(-3);
+        
+        console.log('Payment Request - All saved addresses:', all_addresses);
+        console.log('Payment Request - Recent addresses to show:', recent_addresses);
+        console.log('Payment Request - Current address:', current_address);
+
+        // If a new address is being added, use it
+        const address_to_use = current_address;
+        
+        // Store the current address as selected
+        await collection.updateOne(
+            { recipient_id },
+            { 
+                $set: { 
+                    selected_address: address_to_use
+                }
+            },
+            { upsert: true }
+        );
+
+        // Store for order creation
+        await store_user_data(recipient_id, 'selected_address', address_to_use);
+
+        const expiration_timestamp = Math.floor(Date.now() / 1000) + 600;
+        const reference_id = generate_reference_id();
+        await store_user_data(recipient_id, 'reference_id', reference_id);
+        const order_items = await fetch_user_data(recipient_id, 'order_info');
+
+        let total_amount = 0;
+        const items = [];
 
     for (const item of order_items) {
         const product_id = item.product_retailer_id.split("_").pop();
@@ -507,7 +579,7 @@ async function payment_request(recipient_id, shipping_addresses) {
                                     ],
                                     "shipping_info": {
                                         "country": "IN",
-                                        "addresses": shipping_addresses
+                                        "addresses": recent_addresses // Show recent addresses
                                     },
                                     "order": {
                                         "items": items,
@@ -544,16 +616,16 @@ async function payment_request(recipient_id, shipping_addresses) {
         }
     };
 
-    try {
+        // Update shipping_info in the request
         const response = await axios.post(url, data, { headers });
         if (response.status === 200) {
-            return { success: true, message: "Address message sent successfully." };
+            return { success: true, message: "Address message sent successfully.", selected_address: address_to_use};
         } else {
             return { success: false, error: response.data };
-        }
+        }        
     } catch (error) {
-        console.error('Error sending payment request:', error);
-        return { success: false, error: 'Failed to send payment request' };
+        console.error('Error in payment_request:', error);
+        throw error;
     }
 }
 
@@ -676,66 +748,46 @@ async function create_woocommerce_order(recipient_id) {
 
         // Fetch all required data
         const order_items = await fetch_user_data(recipient_id, 'order_info');
-        const shipping_info = await fetch_user_data(recipient_id, 'shipping_addresses');
+        const selected_address = await fetch_user_data(recipient_id, 'selected_address');
         const payments_info = await fetch_user_data(recipient_id, 'Payments Info');
 
-        // Initialize shipping defaults
-        const shipping_defaults = {
-            name: "",
-            phone_number: recipient_id,
-            address: "",
-            city: "",
-            state: "State not found",
-            in_pin_code: "",
-            house_number: "",
-            tower_number: "",
-            building_name: "",
-            landmark_area: ""
-        };
+        console.log('Creating order with address:', selected_address);
 
-        // Update shipping defaults with actual data if available
-        if (shipping_info && shipping_info.length > 0) {
-            Object.assign(shipping_defaults, shipping_info[0]);
-        }
-
-        // Format line items
-        const line_items = order_items.map(item => ({
-            product_id: parseInt(item.product_retailer_id.split('_').pop()),
-            quantity: parseInt(item.quantity)
-        }));
-
-        // Construct order data
+        // Use the selected address for the order
         const order_data = {
             payment_method: payments_info?.payment_method || 'upi',
             payment_method_title: payments_info?.transaction_status || 'Paid',
             set_paid: true,
             billing: {
-                first_name: shipping_defaults.name,
-                address_1: shipping_defaults.address,
-                city: shipping_defaults.city,
-                state: shipping_defaults.state,
-                postcode: String(shipping_defaults.in_pin_code),
+                first_name: selected_address.name,
+                address_1: selected_address.address,
+                city: selected_address.city,
+                state: selected_address.state,
+                postcode: String(selected_address.in_pin_code),
                 country: 'IN',
-                phone: shipping_defaults.phone_number,
-                house_number: shipping_defaults.house_number,
-                tower_number: shipping_defaults.tower_number,
-                building_name: shipping_defaults.building_name,
-                landmark_area: shipping_defaults.landmark_area
+                phone: selected_address.phone_number,
+                house_number: selected_address.house_number,
+                tower_number: selected_address.tower_number,
+                building_name: selected_address.building_name,
+                landmark_area: selected_address.landmark_area
             },
             shipping: {
-                first_name: shipping_defaults.name,
-                address_1: shipping_defaults.address,
-                city: shipping_defaults.city,
-                state: shipping_defaults.state,
-                postcode: String(shipping_defaults.in_pin_code),
+                first_name: selected_address.name,
+                address_1: selected_address.address,
+                city: selected_address.city,
+                state: selected_address.state,
+                postcode: String(selected_address.in_pin_code),
                 country: 'IN',
-                phone: shipping_defaults.phone_number,
-                house_number: shipping_defaults.house_number,
-                tower_number: shipping_defaults.tower_number,
-                building_name: shipping_defaults.building_name,
-                landmark_area: shipping_defaults.landmark_area
+                phone: selected_address.phone_number,
+                house_number: selected_address.house_number,
+                tower_number: selected_address.tower_number,
+                building_name: selected_address.building_name,
+                landmark_area: selected_address.landmark_area
             },
-            line_items: line_items
+            line_items: order_items.map(item => ({
+                product_id: parseInt(item.product_retailer_id.split('_').pop()),
+                quantity: parseInt(item.quantity)
+            }))
         };
 
         // Construct proper WooCommerce orders endpoint
@@ -788,6 +840,11 @@ async function get_post_office_info(recipient_id, response_data) {
     const params = { pincode };
 
     try {
+        // Ensure the database is initialized
+        if (!collection) {
+            await initializeDb();
+        }
+
         const response = await axios.get(api_url, { params });
         const data = response.data;
 
@@ -808,9 +865,20 @@ async function get_post_office_info(recipient_id, response_data) {
                 landmark_area: landmark
             };
 
-            const shipping_addresses = [address_info];
-            await store_user_data(recipient_id, 'shipping_addresses', shipping_addresses);
-            return await payment_request(recipient_id, shipping_addresses);
+            // Store the address_info as selected_address
+            await collection.updateOne(
+                { recipient_id },
+                { 
+                    $set: { 
+                        selected_address: address_info
+                    },
+                    $push: { shipping_addresses: address_info } // Add new address to shipping_addresses
+                },
+                { upsert: true }
+            );
+
+            await store_user_data(recipient_id, 'selected_address', address_info);
+            return await payment_request(recipient_id, address_info);
         }
     } catch (error) {
         console.error('Error fetching post office info:', error);
@@ -819,27 +887,63 @@ async function get_post_office_info(recipient_id, response_data) {
 }
 
 async function next_address(recipient_id, response_data) {
-    const address_info = {
-        name: response_data.name.trim(),
-        phone_number: response_data.phone_number.trim(),
-        address: response_data.address.trim(),
-        city: response_data.city.trim(),
-        state: response_data.state.trim(),
-        in_pin_code: response_data.in_pin_code.trim(),
-        house_number: response_data.house_number.trim(),
-        tower_number: response_data.tower_number.trim(),
-        building_name: response_data.building_name.trim(),
-        landmark_area: response_data.landmark_area.trim()
-    };
+    try {
+        // Format new address info
+        const new_address = {
+            name: (response_data.name || '').trim(),
+            phone_number: (response_data.phone_number || '').trim(),
+            address: (response_data.address || '').trim(),
+            city: (response_data.city || '').trim(),
+            state: (response_data.state || '').trim(),
+            in_pin_code: (response_data.in_pin_code || '').trim(),
+            house_number: (response_data.house_number || '').trim(),
+            tower_number: (response_data.tower_number || '').trim(),
+            building_name: (response_data.building_name || '').trim(),
+            landmark_area: (response_data.landmark_area || '').trim()
+        };
 
-    const phone_number = address_info.phone_number;
-    if (phone_number && phone_number.length === 10) {
-        address_info.phone_number = "91" + phone_number;
+        if (new_address.phone_number && new_address.phone_number.length === 10) {
+            new_address.phone_number = "91" + new_address.phone_number;
+        }
+
+        // Get existing addresses
+        const document = await collection.findOne({ recipient_id });
+        let current_addresses = document?.shipping_addresses || [];
+
+        // Check for duplicate address
+        const isDuplicate = current_addresses.some(addr => 
+            addr.address === new_address.address &&
+            addr.in_pin_code === new_address.in_pin_code &&
+            addr.city === new_address.city
+        );
+
+        if (isDuplicate) {
+            console.log("Duplicate address found");
+            return await payment_request(recipient_id, new_address);
+        }
+
+        // Add new address to existing addresses
+        current_addresses.push(new_address);
+
+        // Update MongoDB with all addresses
+        await collection.updateOne(
+            { recipient_id },
+            { 
+                $set: { 
+                    shipping_addresses: current_addresses,
+                    selected_address: new_address
+                }
+            },
+            { upsert: true }
+        );
+
+        console.log(`Added new address for ${recipient_id}. Total addresses: ${current_addresses.length}`);
+        return await payment_request(recipient_id, new_address);
+
+    } catch (error) {
+        console.error('Error in next_address:', error);
+        throw error;
     }
-
-    const shipping_addresses = [address_info];
-    await store_user_data(recipient_id, 'shipping_addresses', shipping_addresses);
-    return await payment_request(recipient_id, shipping_addresses);
 }
 
 async function cancel_order_info(recipient_id) {
@@ -921,6 +1025,12 @@ async function cancel_order_confirmation(order_id, phone, total_amount) {
         console.error('Error sending cancel order confirmation:', error);
         return { success: false, error: 'Failed to send cancel order confirmation' };
     }
+}
+
+function generate_reference_id() {
+    const prefix = "skygoal";
+    const unique_number = Math.floor(Math.random() * 1000000) + 100;
+    return `${prefix}-${unique_number}`;
 }
 
 function generate_hash(merchant_key, command, mihpayid, salt) {

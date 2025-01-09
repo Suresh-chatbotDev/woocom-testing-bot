@@ -3,7 +3,7 @@ const bodyParser = require('body-parser');
 const { MongoClient } = require('mongodb');
 const dotenv = require('dotenv');
 const logger = require('morgan');
-const { get_started, product_detail, initialize_user, store_user_data, fetch_user_data, next_address, create_woocommerce_order, get_post_office_info, order_confirmation, address, fetch_order_status, enter_order_id, pincode } = require('./utility/ecom');
+const { get_started, product_detail, initialize_user, store_user_data, fetch_user_data, next_address, create_woocommerce_order, get_post_office_info, order_confirmation, address, fetch_order_status, enter_order_id, pincode, payment_request } = require('./utility/ecom');
 const { catalog } = require('./utility/all_product_catalog');
 
 // Suppress all CryptographyDeprecationWarnings
@@ -114,16 +114,29 @@ app.post('/webhook', async (req, res) => {
                             if (title === "Get Started") {
                                 return res.json(await catalog(recipient_id));
                             } else if (title === "Continue") {
-                                const document = await collection.findOne({ recipient_id }, { projection: { shipping_addresses: 1 } });
-                                if (document) {
-                                    for (const shipping_addresses of document.shipping_addresses || []) {
-                                        return res.json(await address(recipient_id, shipping_addresses));
+                                try {
+                                    await initializeDb(); // Make sure database is initialized first
+                                    const document = await collection.findOne({ recipient_id }, { projection: { shipping_addresses: 1 } });
+                                    console.log('Found document:', document); // Debug log
+                                    
+                                    if (document && document.shipping_addresses && document.shipping_addresses.length > 0) {
+                                        // Use the last saved address
+                                        const lastAddress = document.shipping_addresses[document.shipping_addresses.length - 1];
+                                        return res.json(await address(recipient_id, lastAddress));
+                                    } else {
+                                        console.log("No shipping address found, requesting new address");
+                                        return res.json(await pincode(recipient_id));
                                     }
-                                } else {
-                                    console.log("----------------After continue button clicked, but no shipping address found------------------");
-                                    return res.json(await pincode(recipient_id));
+                                } catch (error) {
+                                    console.error('Error in Continue button handler:', error);
+                                    return res.status(500).json({ 
+                                        status: 'error', 
+                                        message: 'Database operation failed',
+                                        error: error.message 
+                                    });
                                 }
-                            } else if (title === "Decline") {
+                            }
+                            else if (title === "Decline") {
                                 return res.json(await get_started(recipient_id));
                             } else if (title === "Add more items") {
                                 return res.json(await catalog(recipient_id));
@@ -179,6 +192,7 @@ app.post('/webhook', async (req, res) => {
                             };
                             
                             await store_user_data(recipient_id, 'Payments Info', payment_info);
+                            console.log(`Stored order info for ${recipient_id}: ${JSON.stringify(await fetch_user_data(recipient_id, 'order_info'))}`);
                             return res.json(await create_woocommerce_order(recipient_id));
                         }
                     }
@@ -271,84 +285,6 @@ app.get('/webhook', (req, res) => {
     console.warn("Invalid verification token");
     return res.status(403).send('Error, wrong validation token');
 });
-
-// app.post('/test-webhook', (req, res) => {
-//     console.log("Test webhook received");
-//     console.log("Headers:", req.headers);
-//     console.log("Body:", req.body);
-//     res.status(200).json({ status: 'success', message: 'Test webhook received' });
-// });
-
-// Test endpoint to verify order flow
-// app.post('/test-order-flow', async (req, res) => {
-//     console.log("\n=== TEST ORDER FLOW STARTED ===");
-//     console.log("Current Date and Time (UTC):", new Date().toISOString());
-    
-//     // Create a test order with your actual data
-//     const testOrder = {
-//         id: "TEST_" + Date.now(),
-//         status: "processing",
-//         billing: {
-//             first_name: "Suresh",
-//             phone: "919177656295"  // Your test phone number
-//         },
-//         total: "100.00"
-//     };
-
-//     console.log("Test Order Data:", JSON.stringify(testOrder, null, 2));
-
-//     try {
-//         // Test order confirmation flow
-//         console.log("Attempting to send order confirmation...");
-//         const result = await order_confirmation(
-//             testOrder.billing.phone,
-//             testOrder.billing.first_name,
-//             testOrder.total,
-//             testOrder.status,
-//             testOrder.id
-//         );
-
-//         console.log("\n=== Test Result ===");
-//         console.log(JSON.stringify(result, null, 2));
-
-//         if (result.success) {
-//             console.log("✅ Test order flow completed successfully!");
-//             res.status(200).json({
-//                 status: 'success',
-//                 message: 'Test order flow completed successfully',
-//                 details: result
-//             });
-//         } else {
-//             console.log("⚠️ Test completed with warnings!");
-//             res.status(200).json({
-//                 status: 'warning',
-//                 message: 'Test completed with warnings',
-//                 details: result
-//             });
-//         }
-
-//     } catch (error) {
-//         console.error("❌ Test Error:", error);
-//         res.status(500).json({
-//             status: 'error',
-//             message: 'Test order flow failed',
-//             error: error.message
-//         });
-//     } finally {
-//         console.log("=== TEST ORDER FLOW ENDED ===\n");
-//     }
-// });
-
-// Simple GET endpoint to check if service is running
-// app.get('/test-status', (req, res) => {
-//     res.status(200).json({
-//         status: 'active',
-//         timestamp: new Date().toISOString(),
-//         message: 'Order confirmation service is running'
-//     });
-// });
-
-// Ensure MongoDB is initialized before starting the server
 
 initializeDb().then(() => {
     console.log("MongoDB is ready.");
