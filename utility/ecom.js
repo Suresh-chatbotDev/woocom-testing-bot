@@ -631,14 +631,7 @@ async function payment_request(recipient_id, current_address) {
 
 async function order_confirmation(phone, first_name, total_amount, status, order_id) {
     console.log("\n======== ORDER CONFIRMATION START ========");
-    console.log("Timestamp:", new Date().toISOString());
-    console.log("Input Parameters:", {
-        phone,
-        first_name,
-        total_amount,
-        status,
-        order_id
-    });
+    console.log("Input Parameters:", { phone, first_name, total_amount, status, order_id });
 
     try {
         // Validate input parameters
@@ -646,94 +639,155 @@ async function order_confirmation(phone, first_name, total_amount, status, order
             throw new Error("Missing required parameters");
         }
 
-        // Format total amount
         const formattedTotal = total_amount ? parseFloat(total_amount).toFixed(2) : '0.00';
         
-        // Construct message
-        const message = `Order Confirmation! 🎉\nHello, *${first_name}* !\n\nThank you for your order Order ID: *${order_id}*.\nYour order status is: *${status}*.\n\nTotal Amount: *₹${formattedTotal}* \n\nWe're getting it ready and will update you once it's on the way. 🚚\n\nIf you need help, just reply to this message. Thanks for choosing us! 😊`;
-        
-        console.log("Constructed Message:", message);
-
         const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
         const headers = {
             'Authorization': `Bearer ${access_token}`,
             'Content-Type': 'application/json'
         };
 
-        const data = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": phone,
-            "type": "interactive",
-            "interactive": {
-                "type": "button",
-                "body": {
-                    "text": message
-                },
-                "action": {
-                    "buttons": [
-                        {
-                            "type": "reply",
-                            "reply": {
-                                "id": "home_menu",
-                                "title": "Home Menu"
+        // First try sending as interactive message
+        try {
+            const messageText = `Order Confirmation! 🎉\nHello, *${first_name}* !\n\nThank you for your order Order ID: *${order_id}*.\nYour order status is: *${status}*.\n\nTotal Amount: *₹${formattedTotal}* \n\nWe're getting it ready and will update you once it's on the way. 🚚\n\nIf you need help, just reply to this message. Thanks for choosing us! 😊`;
+
+            const regularMessage = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": phone,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {
+                        "text": messageText
+                    },
+                    "action": {
+                        "buttons": [
+                            {
+                                "type": "reply",
+                                "reply": {
+                                    "id": "home_menu",
+                                    "title": "Home Menu"
+                                }
+                            },
+                            {
+                                "type": "reply",
+                                "reply": {
+                                    "id": "status_id",
+                                    "title": "Track Order"
+                                }
                             }
-                        },
-                        {
-                            "type": "reply",
-                            "reply": {
-                                "id": "status_id",
-                                "title": "Track Order"
-                            }
-                        }
-                    ]
+                        ]
+                    }
                 }
-            }
-        };
+            };
 
-        console.log("Preparing WhatsApp API Request:", {
-            url,
-            recipient: phone,
-            messageType: "interactive"
-        });
-
-        const response = await axios.post(url, data, { headers });
-        
-        console.log("WhatsApp API Response Status:", response.status);
-        console.log("WhatsApp API Response Data:", JSON.stringify(response.data, null, 2));
-
-        if (response.status === 200) {
-            console.log(`✅ Order confirmation sent successfully for order ${order_id}`);
+            const response = await axios.post(url, regularMessage, { headers });
+            console.log("Regular Message Response:", response.status);
             return { 
                 success: true, 
-                message: "Order confirmation message sent successfully.",
+                message: "Order confirmation sent successfully",
+                type: "regular",
                 order_id,
                 timestamp: new Date().toISOString()
             };
-        } else {
-            console.error(`❌ Failed to send order confirmation for order ${order_id}. Status: ${response.status}`);
-            return { 
-                success: false, 
-                error: response.data,
-                status: response.status 
-            };
+
+        } catch (error) {
+            // Check for 24-hour window limitation
+            if (error.response?.data?.error?.code === 131047) {
+                console.log("24-hour window exceeded, attempting template message...");
+                
+                // Template message structure
+                const templateMessage = {
+                    "messaging_product": "whatsapp",
+                    "to": phone,
+                    "type": "template",
+                    "template": {
+                        "name": "order_confirmation",
+                        "language": {
+                            "code": "en"
+                        },
+                        "components": [
+                            {
+                                "type": "body",
+                                "parameters": [
+                                    {
+                                        "type": "text",
+                                        "text": first_name
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": order_id
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": formattedTotal
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": status
+                                    }
+                                ]
+                            },                            
+                            {
+                                "type": "button",
+                                "sub_type": "quick_reply",
+                                "index": "0",
+                                "parameters": [
+                                    {
+                                        "type": "text",
+                                        "text": "Track Order"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "button",
+                                "sub_type": "quick_reply",
+                                "index": "1",
+                                "parameters": [
+                                    {
+                                        "type": "text",
+                                        "text": "Home Menu"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                };
+
+                try {
+                    const templateResponse = await axios.post(url, templateMessage, { headers });
+                    console.log("Template Message Response:", templateResponse.status);
+                    return { 
+                        success: true, 
+                        message: "Order confirmation sent via template",
+                        type: "template",
+                        order_id,
+                        timestamp: new Date().toISOString()
+                    };
+                } catch (templateError) {
+                    console.error("Template message failed:", templateError.response?.data);
+                    throw templateError;
+                }
+            }
+            throw error;
         }
     } catch (error) {
-        console.error("=== ORDER CONFIRMATION ERROR ===");
-        console.error("Error Details:", {
+        console.error("ORDER CONFIRMATION ERROR:", {
             message: error.message,
-            stack: error.stack,
-            response: error.response?.data
+            response: error.response?.data,
+            status: error.response?.status,
+            errorCode: error.response?.data?.error?.code
         });
-        
         return { 
             success: false, 
             error: 'Failed to send order confirmation',
-            errorMessage: error.message,
+            errorMessage: error.response?.data?.error?.message || error.message,
+            errorCode: error.response?.data?.error?.code,
             timestamp: new Date().toISOString()
         };
     } finally {
-        console.log("=== ORDER CONFIRMATION END ===\n");
+        console.log("======== ORDER CONFIRMATION END ========\n");
     }
 }
 
