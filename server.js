@@ -185,15 +185,34 @@ app.post('/webhook', async (req, res) => {
                             status.payment?.transaction?.status === 'success') {
                             
                             const recipient_id = status.recipient_id;
+                            const shipping_address = status.payment.shipping_info.shipping_address;
+                            
+                            // Store shipping address
+                            await store_user_data(recipient_id, 'selected_address', shipping_address);
+                            
+                            // Store payment info
                             const payment_info = {
                                 payment_status: status.status,
-                                transaction_id: status.payment?.transaction?.id,
-                                payment_method: status.payment?.transaction?.method?.type
+                                transaction_id: status.payment.transaction.id,
+                                payment_method: status.payment.transaction.method.type,
+                                transaction_status: 'Paid'
                             };
                             
                             await store_user_data(recipient_id, 'Payments Info', payment_info);
-                            console.log(`Stored order info for ${recipient_id}: ${JSON.stringify(await fetch_user_data(recipient_id, 'order_info'))}`);
                             return res.json(await create_woocommerce_order(recipient_id));
+                            
+                            // if you want to send Order Confirmation Instantly after payment success then uncomment below code
+                            // const order = await create_woocommerce_order(recipient_id);
+                            // if (order) {
+                            //     await order_confirmation(
+                            //         recipient_id,
+                            //         shipping_address.name || 'Customer',
+                            //         order.total,
+                            //         order.status,
+                            //         order.id
+                            //     );
+                            // }
+                            // return res.json(order);
                         }
                     }
                 }
@@ -288,7 +307,7 @@ app.get('/webhook', (req, res) => {
 
 initializeDb().then(() => {
     console.log("MongoDB is ready.");
-    const PORT = process.env.PORT || 3000;
+    const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
     });

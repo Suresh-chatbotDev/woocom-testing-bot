@@ -457,7 +457,7 @@ async function payment_request(recipient_id, current_address) {
         if (!collection) {
             await initializeDb();
         }
-
+        
         // Get all addresses from DB
         const document = await collection.findOne({ recipient_id });
         const all_addresses = document?.shipping_addresses || [];
@@ -629,165 +629,498 @@ async function payment_request(recipient_id, current_address) {
     }
 }
 
+// This is Order confirmation function to send order confirmation messages to users.
+// This function will attempt to send a regular confirmation message first. If the user is inactive (24h window expired), it will try a template message. If that fails, it will try a re-engagement message. If all attempts fail, it will return an error response. 
+// Currently(17/01/25), It is sending order confirmation message to only for the Active users(regular).
+// For the inactive users, it is not sending the order confirmation message to the user. As a fallback we can send the order confirmation message through SMS.
+// Right now the fallback( Normal SMS Message ) message is not implemented in this function.
+// You can use the fallback message implementation by uncommenting the "sendSMSConfirmation" function and the "This 👇 order_confirmation" function.
 async function order_confirmation(phone, first_name, total_amount, status, order_id) {
     console.log("\n======== ORDER CONFIRMATION START ========");
     console.log("Input Parameters:", { phone, first_name, total_amount, status, order_id });
 
     try {
         // Validate input parameters
-        if (!phone || !first_name || !order_id) {
+        if (!phone || !first_name || !total_amount || !status || !order_id) {
             throw new Error("Missing required parameters");
         }
 
-        const formattedTotal = total_amount ? parseFloat(total_amount).toFixed(2) : '0.00';
-        
-        const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
-        const headers = {
-            'Authorization': `Bearer ${access_token}`,
-            'Content-Type': 'application/json'
-        };
-
-        // First try sending as interactive message
+        // First try sending regular confirmation
         try {
-            const messageText = `Order Confirmation! 🎉\nHello, *${first_name}* !\n\nThank you for your order Order ID: *${order_id}*.\nYour order status is: *${status}*.\n\nTotal Amount: *₹${formattedTotal}* \n\nWe're getting it ready and will update you once it's on the way. 🚚\n\nIf you need help, just reply to this message. Thanks for choosing us! 😊`;
-
-            const regularMessage = {
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "to": phone,
-                "type": "interactive",
-                "interactive": {
-                    "type": "button",
-                    "body": {
-                        "text": messageText
-                    },
-                    "action": {
-                        "buttons": [
-                            {
-                                "type": "reply",
-                                "reply": {
-                                    "id": "home_menu",
-                                    "title": "Home Menu"
-                                }
-                            },
-                            {
-                                "type": "reply",
-                                "reply": {
-                                    "id": "status_id",
-                                    "title": "Track Order"
-                                }
-                            }
-                        ]
-                    }
-                }
-            };
-
-            const response = await axios.post(url, regularMessage, { headers });
-            console.log("Regular Message Response:", response.status);
-            return { 
-                success: true, 
-                message: "Order confirmation sent successfully",
-                type: "regular",
-                order_id,
-                timestamp: new Date().toISOString()
-            };
-
-        } catch (error) {
-            // Check for 24-hour window limitation
-            if (error.response?.data?.error?.code === 131047) {
-                console.log("24-hour window exceeded, attempting template message...");
-                
-                // Template message structure
-                const templateMessage = {
-                    "messaging_product": "whatsapp",
-                    "to": phone,
-                    "type": "template",
-                    "template": {
-                        "name": "order_confirmation",
-                        "language": {
-                            "code": "en"
-                        },
-                        "components": [
-                            {
-                                "type": "body",
-                                "parameters": [
-                                    {
-                                        "type": "text",
-                                        "text": first_name
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": order_id
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": formattedTotal
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": status
-                                    }
-                                ]
-                            },                            
-                            {
-                                "type": "button",
-                                "sub_type": "quick_reply",
-                                "index": "0",
-                                "parameters": [
-                                    {
-                                        "type": "text",
-                                        "text": "Track Order"
-                                    }
-                                ]
-                            },
-                            {
-                                "type": "button",
-                                "sub_type": "quick_reply",
-                                "index": "1",
-                                "parameters": [
-                                    {
-                                        "type": "text",
-                                        "text": "Home Menu"
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                };
-
+            console.log("Attempting regular confirmation message first...");
+            const regularResult = await sendRegularConfirmation(phone, first_name, total_amount, status, order_id);
+            if (regularResult.success) {
+                console.log("Regular confirmation sent successfully");
+                return regularResult;
+            }
+        } catch (regularError) {
+            console.log("Regular confirmation failed:", regularError.response?.data?.error || regularError);
+            
+            // If error is due to user being inactive (24h window), try template
+            if (regularError.response?.data?.error?.code === 131047) {
+                console.log("User is inactive. Attempting template message...");
                 try {
-                    const templateResponse = await axios.post(url, templateMessage, { headers });
-                    console.log("Template Message Response:", templateResponse.status);
-                    return { 
-                        success: true, 
-                        message: "Order confirmation sent via template",
-                        type: "template",
-                        order_id,
-                        timestamp: new Date().toISOString()
-                    };
+                    const templateResult = await sendTemplateConfirmation(phone, first_name, total_amount, status, order_id);
+                    if (templateResult.success) {
+                        return templateResult;
+                    }
                 } catch (templateError) {
-                    console.error("Template message failed:", templateError.response?.data);
-                    throw templateError;
+                    console.error("Template message failed:", templateError);
+                    try {
+                        const reengagementResult = await sendReengagementMessage(phone, first_name, total_amount, status, order_id);
+                        if (reengagementResult.success) {
+                            return reengagementResult;
+                        }
+                    } catch (reengagementError) {
+                        console.error("Re-engagement message failed:", reengagementError);
+                    }
                 }
             }
-            throw error;
         }
+
+        // If all attempts fail, try one last time with regular message as a fallback
+        console.log("All attempts failed. Sending regular message as a fallback...");
+        return await sendRegularConfirmation(phone, first_name, total_amount, status, order_id);
+
     } catch (error) {
-        console.error("ORDER CONFIRMATION ERROR:", {
-            message: error.message,
-            response: error.response?.data,
-            status: error.response?.status,
-            errorCode: error.response?.data?.error?.code
-        });
-        return { 
-            success: false, 
-            error: 'Failed to send order confirmation',
-            errorMessage: error.response?.data?.error?.message || error.message,
-            errorCode: error.response?.data?.error?.code,
+        console.error("Order confirmation failed:", error.response?.data || error.message);
+        return {
+            success: false,
+            message: "Order created but notification failed",
+            order_id,
+            notification_status: 'failed',
+            error_code: error.response?.data?.error?.code,
             timestamp: new Date().toISOString()
         };
     } finally {
         console.log("======== ORDER CONFIRMATION END ========\n");
+    }
+}
+
+// Uncomment the below code to use the fallback message for the inactive users.
+// Function to send order confirmation message using regular text message for inactive users.
+// async function sendSMSConfirmation(phone, first_name, total_amount, status, order_id) {
+//     console.log("Attempting to send SMS confirmation message");
+    
+//     // Remove any WhatsApp specific formatting from the phone number
+//     const cleanPhone = phone.replace('whatsapp:', '');
+    
+//     // Create a simple SMS message without emojis and formatting
+//     const message = `Order Confirmation: Hello ${first_name}, thank you for your order #${order_id}. Status: ${status}. Total Amount: Rs.${total_amount}. We're preparing your order and will notify you when it's on the way. Need help? Contact our support.`;
+
+//     try {
+//         // Using a hypothetical SMS service (you'll need to replace with your actual SMS provider)
+//         // Example using Twilio
+//         const response = await axios.post('YOUR_SMS_API_ENDPOINT', {
+//             to: cleanPhone,
+//             message: message,
+//             // Add any other required parameters for your SMS provider
+//         }, {
+//             headers: {
+//                 'Authorization': `Bearer ${sms_api_key}`, // Your SMS provider API key
+//                 'Content-Type': 'application/json'
+//             }
+//         });
+
+//         return {
+//             success: true,
+//             message: "SMS confirmation sent successfully",
+//             type: "sms",
+//             order_id: order_id,
+//             timestamp: new Date().toISOString()
+//         };
+
+//     } catch (error) {
+//         console.error("SMS sending error:", error.response?.data || error);
+//         return {
+//             success: false,
+//             message: "SMS confirmation failed",
+//             error: error.response?.data || error,
+//             timestamp: new Date().toISOString()
+//         };
+//     }
+// }
+
+// Comment that above order_confirmation function and uncomment this order_confirmation function to use the fallback message.
+// Use this order_confirmation function when you want to send the fallback message to the inactive users.
+// This order_confirmation has the fallback message implementation.
+// Uncomment the "sendSMSConfirmation" function to use the fallback message.
+// async function order_confirmation(phone, first_name, total_amount, status, order_id) {
+//     console.log("\n======== ORDER CONFIRMATION START ========");
+//     console.log("Input Parameters:", { phone, first_name, total_amount, status, order_id });
+
+//     try {
+//         // Validate input parameters
+//         if (!phone || !first_name || !total_amount || !status || !order_id) {
+//             throw new Error("Missing required parameters");
+//         }
+
+//         let isInactiveUser = false;
+        
+//         // First try sending regular WhatsApp confirmation
+//         try {
+//             console.log("Attempting regular WhatsApp confirmation message first...");
+//             const regularResult = await sendRegularConfirmation(phone, first_name, total_amount, status, order_id);
+//             if (regularResult.success) {
+//                 console.log("Regular WhatsApp confirmation sent successfully");
+//                 return regularResult;
+//             }
+//         } catch (regularError) {
+//             console.log("Regular WhatsApp confirmation failed:", regularError.response?.data?.error || regularError);
+            
+//             // Check if user is inactive
+//             if (regularError.response?.data?.error?.code === 131047) {
+//                 isInactiveUser = true;
+//                 console.log("User is inactive. Attempting template message...");
+                
+//                 try {
+//                     const templateResult = await sendTemplateConfirmation(phone, first_name, total_amount, status, order_id);
+//                     if (templateResult.success) {
+//                         return templateResult;
+//                     }
+//                 } catch (templateError) {
+//                     console.error("Template message failed:", templateError);
+                    
+//                     try {
+//                         const reengagementResult = await sendReengagementMessage(phone, first_name, total_amount, status, order_id);
+//                         if (reengagementResult.success) {
+//                             return reengagementResult;
+//                         }
+//                     } catch (reengagementError) {
+//                         console.error("Re-engagement message failed:", reengagementError);
+//                     }
+//                 }
+//             }
+//         }
+
+//         // If user is inactive and all WhatsApp attempts failed, try SMS
+//         if (isInactiveUser) {
+//             console.log("All WhatsApp attempts failed for inactive user. Attempting SMS fallback...");
+//             const smsResult = await sendSMSConfirmation(phone, first_name, total_amount, status, order_id);
+//             return smsResult;
+//         }
+
+//         // If user is active but WhatsApp failed, try regular WhatsApp one last time
+//         console.log("All attempts failed. Sending regular WhatsApp message as final attempt...");
+//         return await sendRegularConfirmation(phone, first_name, total_amount, status, order_id);
+
+//     } catch (error) {
+//         console.error("Order confirmation failed:", error.response?.data || error.message);
+//         return {
+//             success: false,
+//             message: "Order created but notification failed",
+//             order_id,
+//             notification_status: 'failed',
+//             error_code: error.response?.data?.error?.code,
+//             timestamp: new Date().toISOString()
+//         };
+//     } finally {
+//         console.log("======== ORDER CONFIRMATION END ========\n");
+//     }
+// }
+
+
+async function sendReengagementMessage(phone, first_name, total_amount, status, order_id) {
+    console.log("Attempting to send re-engagement message");
+    const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
+    
+    // Use the same template but with the correct formatting for re-engagement
+    const data = {
+        messaging_product: "whatsapp",
+        to: phone,
+        type: "template",
+        template: {
+            name: "test_order_confirmation",  // Your approved template
+            language: { code: "en" },
+            components: [
+                {
+                    type: "body",
+                    parameters: [
+                        { type: "text", text: first_name },
+                        { type: "text", text: String(order_id) },
+                        { type: "text", text: status },
+                        { type: "text", text: total_amount }
+                    ]
+                },
+                {
+                    type: "button",
+                    sub_type: "quick_reply",
+                    index: 0,
+                    parameters: [
+                        {
+                            type: "text",
+                            text: "Home Menu"
+                        }
+                    ]
+                },
+                {
+                    type: "button",
+                    sub_type: "quick_reply",
+                    index: 1,
+                    parameters: [
+                        {
+                            type: "text",
+                            text: "Track Order"
+                        }
+                    ]
+                }
+            ]
+        }
+    };
+
+    try {
+        const response = await axios.post(url, data, {
+            headers: {
+                'Authorization': `Bearer ${access_token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.data?.messages?.[0]) {
+            throw new Error("Invalid response format");
+        }
+
+        return {
+            success: true,
+            message: "Re-engagement message sent successfully",
+            type: "reengagement",
+            messageId: response.data.messages[0].id,
+            timestamp: new Date().toISOString()
+        };
+    } catch (error) {
+        console.error("Re-engagement message error:", error.response?.data || error);
+        // Instead of throwing, return error response
+        return {
+            success: false,
+            message: "Re-engagement message failed",
+            error: error.response?.data || error,
+            timestamp: new Date().toISOString()
+        };
+    }
+}
+
+async function sendTemplateConfirmation(phone, first_name, total_amount, status, order_id) {
+    console.log("Attempting to send template confirmation message");
+    const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
+    const data = {
+        messaging_product: "whatsapp",
+        to: phone,
+        type: "template",
+        template: {
+            name: "test_order_confirmation",
+            language: { code: "en" },
+            components: [
+                {
+                    type: "body",
+                    parameters: [
+                        { type: "text", text: first_name },
+                        { type: "text", text: String(order_id) },
+                        { type: "text", text: status },
+                        { type: "text", text: total_amount }
+                    ]
+                },
+                {
+                    type: "button",
+                    sub_type: "quick_reply",
+                    index: 0,
+                    parameters: [
+                        {
+                            type: "text",
+                            text: "Home Menu"
+                        }
+                    ]
+                },
+                {
+                    type: "button",
+                    sub_type: "quick_reply",
+                    index: 1,
+                    parameters: [
+                        {
+                            type: "text",
+                            text: "Track Order"
+                        }
+                    ]
+                }
+            ]
+        }
+    };
+
+    console.log('Template message data:', JSON.stringify(data, null, 2));
+
+    try {
+        const response = await axios.post(url, data, {
+            headers: {
+                'Authorization': `Bearer ${access_token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.data && response.data.messages && response.data.messages[0]) {
+            return {
+                success: true,
+                message: "Template message sent successfully",
+                type: "template",
+                messageId: response.data.messages[0].id,
+                timestamp: new Date().toISOString()
+            };
+        }
+        console.log('Template message response:', response.status, response.data);
+        
+        throw new Error("Invalid response format");
+        
+    }catch (error) {
+        console.error('Template message error:', error.response?.data || error.message);
+        
+        // Get the error code and details
+        const errorCode = error.response?.data?.error?.code;
+        const errorDetails = error.response?.data?.error?.error_data?.details;
+        
+        // Handle specific error cases
+        switch(errorCode) {
+            case 131047:
+                // Message failed due to 24-hour window
+                console.log("24-hour window expired. Attempting re-engagement message...");
+                try {
+                    const reengagementResponse = await axios.post(url, data, {
+                        headers: {
+                            'Authorization': `Bearer ${access_token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+    
+                    if (reengagementResponse.data?.messages?.[0]) {
+                        return {
+                            success: true,
+                            message: "Reengagement message sent successfully",
+                            type: "reengagement",
+                            messageId: reengagementResponse.data.messages[0].id,
+                            timestamp: new Date().toISOString()
+                        };
+                    }
+                } catch (reengagementError) {
+                    console.error("Reengagement attempt failed:", {
+                        error: reengagementError.response?.data || reengagementError,
+                        details: reengagementError.response?.data?.error?.error_data?.details
+                    });
+                    return {
+                        success: false,
+                        message: "Reengagement message failed",
+                        error: reengagementError.response?.data || reengagementError,
+                        errorCode: reengagementError.response?.data?.error?.code,
+                        timestamp: new Date().toISOString()
+                    };
+                }
+                break;
+    
+            case 132001:
+                // Template does not exist
+                console.error("Template does not exist or not properly configured");
+                return {
+                    success: false,
+                    message: "Template configuration error",
+                    error: error.response?.data,
+                    errorCode: 132001,
+                    details: errorDetails,
+                    timestamp: new Date().toISOString()
+                };
+    
+            case 100:
+                // Invalid parameter
+                console.error("Invalid template parameter:", errorDetails);
+                return {
+                    success: false,
+                    message: "Invalid template parameter",
+                    error: error.response?.data,
+                    errorCode: 100,
+                    details: errorDetails,
+                    timestamp: new Date().toISOString()
+                };
+    
+            default:
+                // Handle any other errors
+                return {
+                    success: false,
+                    message: "Template message failed",
+                    error: error.response?.data || error,
+                    errorCode: errorCode,
+                    details: errorDetails,
+                    timestamp: new Date().toISOString()
+                };
+        }
+    }
+}
+
+async function sendRegularConfirmation(phone, first_name, total_amount, status, order_id) {
+    console.log("Attempting to send regular confirmation message");
+    
+    const message = `🎉 Order Confirmation!\n\n` +
+        `Hello *${first_name}*!\n\n` +
+        `Thank you for your order!\n\n` +
+        `*Order Details:*\n` +
+        `Order ID: *#${order_id}*\n` +
+        `Status: *${status}*\n` +
+        `Total Amount: *₹${total_amount}*\n\n` +
+        `We're getting your order ready and will notify you when it's on the way! 🚚\n\n` +
+        `Need help? Just reply to this message. Thanks for shopping with us! 😊`;
+
+    const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
+    const data = {
+        messaging_product: "whatsapp",
+        to: phone,
+        type: "interactive",
+        interactive: {
+            type: "button",
+            body: {
+                text: message
+            },
+            action: {
+                buttons: [
+                    {
+                        type: "reply",
+                        reply: {
+                            id: "home_menu",
+                            title: "Home Menu"
+                        }
+                    },
+                    {
+                        type: "reply",
+                        reply: {
+                            id: "track_order",
+                            title: "Track Order"
+                        }
+                    }
+                ]
+            }
+        }
+    };
+
+    try {
+        const response = await axios.post(url, data, {
+            headers: {
+                'Authorization': `Bearer ${access_token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.data && response.data.messages && response.data.messages[0]) {
+            return {
+                success: true,
+                message: "Regular confirmation sent successfully",
+                type: "regular",
+                order_id: order_id,
+                timestamp: new Date().toISOString()
+            };
+        }
+
+        throw new Error("Invalid response format");
+
+    } catch (error) {
+        console.log("Regular message error:", error.response?.data || error);
+        return {
+            success: false,
+            message: "Regular confirmation failed",
+            error: error.response?.data || error
+        };
     }
 }
 
@@ -801,59 +1134,56 @@ async function create_woocommerce_order(recipient_id) {
         }
 
         // Fetch all required data
-        const order_items = await fetch_user_data(recipient_id, 'order_info');
-        const selected_address = await fetch_user_data(recipient_id, 'selected_address');
-        const payments_info = await fetch_user_data(recipient_id, 'Payments Info');
+        const order_items = fetch_user_data(recipient_id, 'order_info');
+        const selected_address = fetch_user_data(recipient_id, 'selected_address');
+        const payments_info = fetch_user_data(recipient_id, 'Payments Info');
+
+        if (!selected_address || !order_items) {
+            throw new Error('Missing required order data');
+        }
 
         console.log('Creating order with address:', selected_address);
 
-        // Use the selected address for the order
+        // Prepare order data
         const order_data = {
             payment_method: payments_info?.payment_method || 'upi',
             payment_method_title: payments_info?.transaction_status || 'Paid',
             set_paid: true,
             billing: {
-                first_name: selected_address.name,
-                address_1: selected_address.address,
-                city: selected_address.city,
-                state: selected_address.state,
-                postcode: String(selected_address.in_pin_code),
+                first_name: selected_address.name || '',
+                address_1: selected_address.address || '',
+                city: selected_address.city || '',
+                state: selected_address.state || '',
+                postcode: selected_address.in_pin_code || '',
                 country: 'IN',
-                phone: selected_address.phone_number,
-                house_number: selected_address.house_number,
-                tower_number: selected_address.tower_number,
-                building_name: selected_address.building_name,
-                landmark_area: selected_address.landmark_area
+                phone: selected_address.phone_number || '',
+                house_number: selected_address.house_number || '',
+                tower_number: selected_address.tower_number || '',
+                building_name: selected_address.building_name || '',
+                landmark_area: selected_address.landmark_area || ''
             },
             shipping: {
-                first_name: selected_address.name,
-                address_1: selected_address.address,
-                city: selected_address.city,
-                state: selected_address.state,
-                postcode: String(selected_address.in_pin_code),
+                first_name: selected_address.name || '',
+                address_1: selected_address.address || '',
+                city: selected_address.city || '',
+                state: selected_address.state || '',
+                postcode: selected_address.in_pin_code || '',
                 country: 'IN',
-                phone: selected_address.phone_number,
-                house_number: selected_address.house_number,
-                tower_number: selected_address.tower_number,
-                building_name: selected_address.building_name,
-                landmark_area: selected_address.landmark_area
+                phone: selected_address.phone_number || '',
+                house_number: selected_address.house_number || '',
+                tower_number: selected_address.tower_number || '',
+                building_name: selected_address.building_name || '',
+                landmark_area: selected_address.landmark_area || ''
             },
+
             line_items: order_items.map(item => ({
                 product_id: parseInt(item.product_retailer_id.split('_').pop()),
                 quantity: parseInt(item.quantity)
             }))
         };
 
-        // Construct proper WooCommerce orders endpoint
-        const ordersEndpoint = `${wc_url}/orders`;
-        console.log('WooCommerce Orders Endpoint:', ordersEndpoint);
-        console.log('Order Data:', JSON.stringify(order_data, null, 2));
-
-        // Update MongoDB
-        await update_mongo_user_data(collection, recipient_id);
-
         // Make the API call
-        const response = await axios.post(ordersEndpoint, order_data, {
+        const response = await axios.post(`${wc_url}/orders`, order_data, {
             auth: {
                 username: wc_user,
                 password: wc_pass
@@ -868,19 +1198,13 @@ async function create_woocommerce_order(recipient_id) {
             orderId: response.data?.id
         });
 
-        if (response.status === 201) {
-            return response.data;
-        }
-
-        throw new Error(`Order creation failed with status ${response.status}`);
+        // Update MongoDB and return response
+        await update_mongo_user_data(collection, recipient_id);
+        return response.data;
 
     } catch (error) {
-        console.error('Error creating WooCommerce order:', {
-            message: error.message,
-            url: error.config?.url,
-            response: error.response?.data
-        });
-        return null;
+        console.error('Error creating WooCommerce order:', error);
+        throw error;
     }
 }
 
