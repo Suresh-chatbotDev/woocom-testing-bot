@@ -4,6 +4,7 @@ const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 const uuid = require('uuid');
 const { URLSearchParams } = require('url');
+const { errorEvents } = require('./event_handler');
 
 dotenv.config();
 
@@ -107,7 +108,7 @@ async function get_started(recipient_id) {
             return { status: 'error', message: error_message, status_code: response.status };
         }
     } catch (error) {
-        console.error('Error sending message:', error);
+        await errorEvents.networkError(recipient_id, 'connection');
         return { status: 'error', message: 'Failed to send message' };
     }
 }
@@ -135,7 +136,7 @@ async function enter_order_id(recipient_id) {
             return { success: false, error: response.data };
         }
     } catch (error) {
-        console.error('Error sending order ID request:', error);
+        await errorEvents.networkError(recipient_id, 'connection');
         return { success: false, error: 'Failed to send order ID request' };
     }
 }
@@ -189,16 +190,17 @@ async function fetch_order_status(order_id, recipient_id) {
             ).join('\n');
 
             // Construct WhatsApp message
-            const message_text = `📦 *Order Update*\n\n` +
-                `Hello ${customer_name},\n` +
-                `Here are your order details:\n` +
+            const message_text = `📦 *Your Order Update is Here!*\n\n` +
+                `Dear *${customer_name}*,\n\n` +
+                `We’ve got your order all set! Here are the details\n\n` +
                 `- *Order ID*: #${order_id}\n` +
                 `- *Order Date*: ${order_date}\n` +
                 `- *Status*: ${order_status}\n` +
                 `- *Total Amount*: ${currency_symbol}${total_amount}\n\n` +
-                `🛒 *Items Ordered:*\n${items_text}\n\n` +
+                `🛒 *Items in Your Order:*\n${items_text}\n\n` +
                 `📍 *Delivery Address*:\n${delivery_address}\n\n` +
-                `Thank you for your purchase!`;
+                ` Thank you for choosing us! We truly appreciate your purchase! \n\n`+
+                `Wishing you a fantastic day ahead!🌟` ;
 
             // Send WhatsApp message
             const whatsapp_response = await axios.post(META_API_URL, {
@@ -255,7 +257,7 @@ async function fetch_order_status(order_id, recipient_id) {
     }
 }
 
-async function fetch_product_data(product_id) {
+async function fetch_product_data(product_id, recipient_id) {
     const store_url = 'https://ecommerce.skygoaltech.com/wp-json/wc/v3/';
     const endpoint = `${store_url}products/${product_id}`;
 
@@ -268,81 +270,95 @@ async function fetch_product_data(product_id) {
         });
 
         if (response.status === 200) {
+            if (!response.data) {
+                await errorEvents.validationError(recipient_id, 'product');
+                throw new Error('Product not found');
+            }
             return response.data.name;
         } else {
             return { error: `Failed to fetch data. Status code: ${response.status}`, details: response.data };
         }
     } catch (error) {
+        await errorEvents.networkError(recipient_id, 'server');
         console.error('Error fetching product data:', error);
         return { error: 'Failed to fetch product data' };
     }
 }
 
 async function product_detail(recipient_id) {
-    const order_items = fetch_user_data(recipient_id, 'order_info');
-    let order_summary_lines = [];
-    let total_amount = 0;
-
-    for (const item of order_items) {
-        const product_id = parseInt(item.product_retailer_id.split('_').pop());
-        const product_retailer_id = await fetch_product_data(product_id);
-        const item_price = item.item_price;
-        const quantity = item.quantity;
-        const line_total = quantity * item_price;
-        total_amount += line_total;
-
-        order_summary_lines.push(
-            `*Product ${product_retailer_id}:*\nQuantity = *${quantity}*\nPrice = *${item_price} INR*\nTotal_price= *${line_total}INR*\n`
-        );
-    }
-
-    const order_summary = order_summary_lines.join("\n") + `\n\nTotal Amount = *${total_amount} INR*`;
-
-    const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
-    const headers = {
-        'Authorization': `Bearer ${access_token}`,
-        'Content-Type': 'application/json'
-    };
-    const data = {
-        "messaging_product": "whatsapp",
-        "to": recipient_id,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": order_summary
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "continue_id",
-                            "title": "Continue"
-                        }
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "decline_id",
-                            "title": "Decline"
-                        }
-                    }
-                ]
-            }
-        }
-    };
-
     try {
-        const response = await axios.post(url, data, { headers });
-        if (response.status === 200) {
-            return { status: 'success', message_id: response.data.messages[0].id };
-        } else {
-            return { status: 'error', error: response.data };
+        const order_items = fetch_user_data(recipient_id, 'order_info');
+        if (!order_items || !order_items.length) {
+            await errorEvents.validationError(recipient_id, 'product');
+            return { status: 'error', error: 'No items in order' };
+        }
+        let order_summary_lines = [];
+        let total_amount = 0;
+
+        for (const item of order_items) {
+            const product_id = parseInt(item.product_retailer_id.split('_').pop());
+            const product_retailer_id = await fetch_product_data(product_id);
+            const item_price = item.item_price;
+            const quantity = item.quantity;
+            const line_total = quantity * item_price;
+            total_amount += line_total;
+
+            order_summary_lines.push(
+                `*Product ${product_retailer_id}:*\nQuantity = *${quantity}*\nPrice = *${item_price} INR*\nTotal_price= *${line_total}INR*\n`
+            );
+        }
+
+        const order_summary = order_summary_lines.join("\n") + `\n\nTotal Amount = *${total_amount} INR*`;
+
+        const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
+        const headers = {
+            'Authorization': `Bearer ${access_token}`,
+            'Content-Type': 'application/json'
+        };
+        const data = {
+            "messaging_product": "whatsapp",
+            "to": recipient_id,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {
+                    "text": order_summary
+                },
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": "continue_id",
+                                "title": "Continue"
+                            }
+                        },
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": "decline_id",
+                                "title": "Decline"
+                            }
+                        }
+                    ]
+                }
+            }
+        };
+
+        try {
+            const response = await axios.post(url, data, { headers });
+            if (response.status === 200) {
+                return { status: 'success', message_id: response.data.messages[0].id };
+            } else {
+                return { status: 'error', error: response.data };
+            }
+        } catch (error) {
+            console.error('Error sending product detail:', error);
+            return { status: 'error', error: 'Failed to send product detail' };
         }
     } catch (error) {
-        console.error('Error sending product detail:', error);
-        return { status: 'error', error: 'Failed to send product detail' };
+        await errorEvents.orderError(recipient_id, 500);
+        throw error;
     }
 }
 
@@ -625,6 +641,11 @@ async function payment_request(recipient_id, current_address) {
         }        
     } catch (error) {
         console.error('Error in payment_request:', error);
+        if (error.code === 'ETIMEDOUT') {
+            await errorEvents.networkError(recipient_id, 'timeout');
+        } else {
+            await errorEvents.paymentError(recipient_id, error.response?.status || 500);
+        }
         throw error;
     }
 }
@@ -1053,15 +1074,14 @@ async function sendTemplateConfirmation(phone, first_name, total_amount, status,
 async function sendRegularConfirmation(phone, first_name, total_amount, status, order_id) {
     console.log("Attempting to send regular confirmation message");
     
-    const message = `🎉 Order Confirmation!\n\n` +
-        `Hello *${first_name}*!\n\n` +
-        `Thank you for your order!\n\n` +
-        `*Order Details:*\n` +
+    const message = `🎉 Woohoo, *${first_name}!* Your Order is Confirmed!\n\n` +
+        `Thank you for shopping with us — you’ve made our day brighter! 🌟 Your order is being prepared with care and love.\n\n` +
+        `*📦 Order Details:*\n` +
         `Order ID: *#${order_id}*\n` +
         `Status: *${status}*\n` +
         `Total Amount: *₹${total_amount}*\n\n` +
-        `We're getting your order ready and will notify you when it's on the way! 🚚\n\n` +
-        `Need help? Just reply to this message. Thanks for shopping with us! 😊`;
+        `🚚 Sit back and relax while we get your package ready. We’ll let you know once it’s on the way!\n\n` +
+        `💬 Have any questions? Just reply to this message — we’re here for you. Thanks for choosing us!`;
 
     const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
     const data = {
@@ -1204,62 +1224,85 @@ async function create_woocommerce_order(recipient_id) {
 
     } catch (error) {
         console.error('Error creating WooCommerce order:', error);
+        
+        // Handle specific WooCommerce API errors
+        if (error.response?.status === 401) {
+            await errorEvents.woocommerceError(recipient_id, 'auth');
+        } else if (error.response?.status === 400) {
+            await errorEvents.validationError(recipient_id, 'order');
+        } else {
+            await errorEvents.woocommerceError(recipient_id, 'order');
+        }
+        
         throw error;
     }
 }
 
 async function get_post_office_info(recipient_id, response_data) {
-    const pincode = response_data.screen_0_TextInput_1.trim();
-    const name = response_data.screen_0_TextInput_0.trim();
-    const address = response_data.screen_0_TextInput_2.trim();
-    const landmark = response_data.screen_0_TextInput_3.trim();
-
-    const api_url = "https://bots-findcanteen.q07dqw.easypanel.host/get_post_office";
-    const params = { pincode };
-
     try {
-        // Ensure the database is initialized
-        if (!collection) {
-            await initializeDb();
+        const pincode = response_data.screen_0_TextInput_1.trim();
+        
+        // Validate pincode format
+        if (!/^\d{6}$/.test(pincode)) {
+            await errorEvents.validationError(recipient_id, 'pincode');
+            return { error: 'Invalid pincode format' };
         }
 
-        const response = await axios.get(api_url, { params });
-        const data = response.data;
+        const name = response_data.screen_0_TextInput_0.trim();
+        const address = response_data.screen_0_TextInput_2.trim();
+        const landmark = response_data.screen_0_TextInput_3.trim();
 
-        if (data.post_office) {
-            const district = data.District;
-            const state = data.State;
+        const api_url = "https://bots-findcanteen.q07dqw.easypanel.host/get_post_office";
+        const params = { pincode };
 
-            const address_info = {
-                name,
-                phone_number: recipient_id,
-                address,
-                city: district,
-                state,
-                in_pin_code: pincode,
-                house_number: "",
-                tower_number: "",
-                building_name: "",
-                landmark_area: landmark
-            };
+        try {
+            // Ensure the database is initialized
+            if (!collection) {
+                await initializeDb();
+            }
 
-            // Store the address_info as selected_address
-            await collection.updateOne(
-                { recipient_id },
-                { 
-                    $set: { 
-                        selected_address: address_info
+            const response = await axios.get(api_url, { params });
+            const data = response.data;
+
+            if (data.post_office) {
+                const district = data.District;
+                const state = data.State;
+
+                const address_info = {
+                    name,
+                    phone_number: recipient_id,
+                    address,
+                    city: district,
+                    state,
+                    in_pin_code: pincode,
+                    house_number: "",
+                    tower_number: "",
+                    building_name: "",
+                    landmark_area: landmark
+                };
+
+                // Store the address_info as selected_address
+                await collection.updateOne(
+                    { recipient_id },
+                    { 
+                        $set: { 
+                            selected_address: address_info
+                        },
+                        $push: { shipping_addresses: address_info } // Add new address to shipping_addresses
                     },
-                    $push: { shipping_addresses: address_info } // Add new address to shipping_addresses
-                },
-                { upsert: true }
-            );
+                    { upsert: true }
+                );
 
-            await store_user_data(recipient_id, 'selected_address', address_info);
-            return await payment_request(recipient_id, address_info);
+                await store_user_data(recipient_id, 'selected_address', address_info);
+                return await payment_request(recipient_id, address_info);
+            }
+        } catch (error) {
+            console.error('Error fetching post office info:', error);
+            return { error: 'Failed to fetch post office info' };
         }
     } catch (error) {
         console.error('Error fetching post office info:', error);
+        await errorEvents.networkError(recipient_id);
         return { error: 'Failed to fetch post office info' };
     }
 }
@@ -1357,7 +1400,7 @@ async function cancel_order_info(recipient_id) {
     }
 }
 
-async function cancel_order(order_id) {
+async function cancel_order(order_id, recipient_id) {
     const store_url = "https://ecommerce.skygoaltech.com";
     const endpoint = `${store_url}/wp-json/wc/v3/orders/${order_id}`;
     const data = { status: "cancelled" };
@@ -1372,7 +1415,7 @@ async function cancel_order(order_id) {
 
         return response.data;
     } catch (error) {
-        console.error('Error cancelling order:', error);
+        await errorEvents.orderError(recipient_id, 500);
         return { error: 'Failed to cancel order' };
     }
 }
@@ -1447,7 +1490,7 @@ async function refund_transaction(phone, total_amount, transaction) {
 
         return response.data;
     } catch (error) {
-        console.error('Error processing refund transaction:', error);
+        await errorEvents.paymentError(phone, 500);
         return { error: 'Failed to process refund transaction' };
     }
 }
@@ -1461,7 +1504,7 @@ function generate_hash(command, var1, salt) {
     return crypto.createHash('sha512').update(hash_string).digest('hex');
 }
 
-async function get_transaction_details(txnid) {
+async function get_transaction_details(txnid, recipient_id) {
     const command = "verify_payment";
     const hash_value = generate_hash(command, txnid, salt);
 
@@ -1484,7 +1527,7 @@ async function get_transaction_details(txnid) {
         const mihpayid = txn_details.mihpayid;
         return mihpayid;
     } catch (error) {
-        console.error('Error fetching transaction details:', error);
+        await errorEvents.paymentError(recipient_id, 500);
         return { error: 'Failed to fetch transaction details' };
     }
 }

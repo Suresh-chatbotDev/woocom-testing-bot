@@ -1,9 +1,10 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const { MongoClient } = require('mongodb');
+const { MongoClient, Code } = require('mongodb');
 const dotenv = require('dotenv');
 const logger = require('morgan');
 const { get_started, product_detail, initialize_user, store_user_data, fetch_user_data, next_address, create_woocommerce_order, get_post_office_info, order_confirmation, address, fetch_order_status, enter_order_id, pincode, payment_request } = require('./utility/ecom');
+const { paymentEvents, systemEvents, errorEvents } = require('./utility/event_handler');
 const { catalog } = require('./utility/all_product_catalog');
 
 // Suppress all CryptographyDeprecationWarnings
@@ -24,8 +25,7 @@ const MONGO_URL = process.env.MONGO_URL;
 const YOUR_PROJECT_ID = process.env.project_id;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || '1234';
 const META_ACCESS_TOKEN = process.env.meta_access_token;
-const META_API_URL = "https://graph.facebook.com/v21.0/470839449443810/messages";
-
+const META_API_URL = process.env.meta_api_url;
 
 // Middleware to ensure the database is initialized
 app.use((req, res, next) => {
@@ -58,8 +58,9 @@ let collection; // This will hold the MongoDB collection reference
 
 // MongoDB Initialization
 async function initializeDb() {
+    let client;
     try {
-        const client = new MongoClient(MONGO_URL, { useNewUrlParser: true, useUnifiedTopology: true });
+        client = new MongoClient(MONGO_URL, { useNewUrlParser: true, useUnifiedTopology: true });
         await client.connect();
         console.log('MongoDB connected');
         const db = client.db("Ecommerce");
@@ -67,16 +68,29 @@ async function initializeDb() {
         console.log('Collection initialized');
     } catch (err) {
         console.error('Failed to initialize MongoDB', err);
-        await client.close(); // Ensure resources are released
-        process.exit(1); // Exit the application if the DB connection fails
+        //Notify any active users about the system error
+        if (global.activeUsers) {
+            for (const user of global.activeUsers) {
+                await systemEvents.connectionError(user.recipient_id);
+            }
+        }
+        if (client) await client.close();
+        process.exit(1);
     }
 }
 
 app.post('/webhook', async (req, res) => {
-    console.log("Webhook POST request received");
     try {
+        console.log("Webhook POST request received");
         const reqBody = req.body;
         console.log(`Request JSON: ${JSON.stringify(reqBody, null, 2)}`);
+
+        // Add validation for message structure
+        if (!reqBody?.entry?.[0]?.changes?.[0]?.value) {
+            const recipient_id = reqBody?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
+            await errorEvents.validationError(recipient_id, 'data');
+            return res.status(400).json({ error: 'Invalid message structure' });
+        }
 
         if (reqBody.entry && reqBody.entry.length > 0) {
             const entry = reqBody.entry[0];
@@ -111,6 +125,7 @@ app.post('/webhook', async (req, res) => {
                         if (interactive.button_reply) {
                             const title = interactive.button_reply.title;
                             console.log(`Button title: ${title}`);
+                            
                             if (title === "Get Started") {
                                 return res.json(await catalog(recipient_id));
                             } else if (title === "Continue") {
@@ -135,7 +150,7 @@ app.post('/webhook', async (req, res) => {
                                         error: error.message 
                                     });
                                 }
-                            }
+                            }                    
                             else if (title === "Decline") {
                                 return res.json(await get_started(recipient_id));
                             } else if (title === "Add more items") {
@@ -159,9 +174,18 @@ app.post('/webhook', async (req, res) => {
                                 return res.json(await next_address(recipient_id, response_data));
                             }
                         }
-                    } else if (message.order) {
+                    }else if (message.order) {
                         console.log("Order message detected");
                         const order_items = message.order.product_items;
+
+                        // Add error handling for quantity validation
+                        const invalidQuantity = message.order.product_items.some(item => 
+                            !item.quantity || item.quantity < 1
+                        );
+                        if (invalidQuantity) {
+                            await errorEvents.validationError(recipient_id, 'quantity');
+                            return res.status(400).json({ error: 'Invalid quantity' });
+                        }
 
                         const products_info = order_items.map(item => ({
                             product_retailer_id: item.product_retailer_id,
@@ -169,50 +193,68 @@ app.post('/webhook', async (req, res) => {
                             item_price: item.item_price,
                             currency: item.currency
                         }));
-
+                
                         await store_user_data(recipient_id, 'order_info', products_info);
                         console.log(`Stored order info for ${recipient_id}: ${JSON.stringify(await fetch_user_data(recipient_id, 'order_info'))}`);
-
+                        
                         return res.json(await product_detail(recipient_id));
                     }
                 }
 
-                // In your webhook POST handler, for payment success:
                 if (value.statuses) {
                     const statuses = value.statuses;
                     for (const status of statuses) {
-                        if (status.type === 'payment' && 
-                            status.payment?.transaction?.status === 'success') {
-                            
+                        if (status.type === 'payment') {
                             const recipient_id = status.recipient_id;
-                            const shipping_address = status.payment.shipping_info.shipping_address;
                             
-                            // Store shipping address
-                            await store_user_data(recipient_id, 'selected_address', shipping_address);
-                            
-                            // Store payment info
-                            const payment_info = {
-                                payment_status: status.status,
-                                transaction_id: status.payment.transaction.id,
-                                payment_method: status.payment.transaction.method.type,
-                                transaction_status: 'Paid'
-                            };
-                            
-                            await store_user_data(recipient_id, 'Payments Info', payment_info);
-                            return res.json(await create_woocommerce_order(recipient_id));
-                            
-                            // if you want to send Order Confirmation Instantly after payment success then uncomment below code
-                            // const order = await create_woocommerce_order(recipient_id);
-                            // if (order) {
-                            //     await order_confirmation(
-                            //         recipient_id,
-                            //         shipping_address.name || 'Customer',
-                            //         order.total,
-                            //         order.status,
-                            //         order.id
-                            //     );
-                            // }
-                            // return res.json(order);
+                            try {
+                                const amount = status.payment?.amount || { value: '0', offset: '100' };
+                                
+                                if (status.payment?.transaction?.status === 'success') {
+                                    const formattedAmount = parseInt(amount.value) / parseInt(amount.offset);
+                                    await paymentEvents.success(recipient_id, formattedAmount);
+                                    
+                                    try {
+                                        const shipping_address = status.payment.shipping_info.shipping_address;
+                                        await store_user_data(recipient_id, 'selected_address', shipping_address);
+                                        
+                                        const payment_info = {
+                                            payment_status: status.status,
+                                            transaction_id: status.payment.transaction.id,
+                                            payment_method: status.payment.transaction.method.type,
+                                            transaction_status: 'Paid'
+                                        };
+                                        
+                                        await store_user_data(recipient_id, 'Payments Info', payment_info);
+                                        
+                                        try {
+                                            const order = await create_woocommerce_order(recipient_id);
+                                            return res.json(order);
+                                        } catch (orderError) {
+                                            console.error('Order creation error:', orderError);
+                                            await errorEvents.orderError(recipient_id, orderError.response?.status || 500);
+                                            return res.status(500).json({ error: 'Order creation failed' });
+                                        }
+                                    } catch (dataError) {
+                                        console.error('Data processing error:', dataError);
+                                        await errorEvents.orderError(recipient_id, 400);
+                                        return res.status(400).json({ error: 'Data processing failed' });
+                                    }
+                                } else {
+                                    await errorEvents.paymentError(recipient_id, 400);
+                                    return res.status(400).json({ error: 'Payment failed' });
+                                }
+                            } catch (error) {
+                                console.error('Payment processing error:', error);
+                                if (error.code === 'ETIMEDOUT') {
+                                    await errorEvents.timeoutError(recipient_id);
+                                } else if (error.code === 'ECONNREFUSED') {
+                                    await errorEvents.networkError(recipient_id);
+                                } else {
+                                    await errorEvents.paymentError(recipient_id, error.response?.status || 500);
+                                }
+                                return res.status(500).json({ error: 'Payment processing failed' });
+                            }
                         }
                     }
                 }
@@ -223,9 +265,12 @@ app.post('/webhook', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'No changes in entry' });
         }
         return res.status(400).json({ status: 'error', message: 'Invalid entry structure' });
-    } catch (e) {
-        console.error("An error occurred while processing the request", e);
-        return res.status(500).json({ status: 'error', message: 'An error occurred while processing the request' });
+    } catch (error) {
+        const recipient_id = req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
+        if (recipient_id) {
+            await errorEvents.networkError(recipient_id, 'server');
+        }
+        return res.status(500).json({ error: 'Server error' });
     }
 });
 
@@ -263,21 +308,30 @@ app.post('/order_status', async (req, res) => {
 
         // Only proceed with order confirmation if we have the necessary data
         if (phone && data.id) {
-            const result = await order_confirmation(
-                phone,
-                data.billing?.first_name || 'Customer',
-                data.total || '0.00',
-                status || 'processing',
-                data.id
-            );
+            try {
+                const result = await order_confirmation(
+                    phone,
+                    data.billing?.first_name || 'Customer',
+                    data.total || '0.00',
+                    data.status || 'processing',
+                    data.id
+                );
 
-            console.log('Order confirmation result:', result);
+                if (!result.success) {
+                    await errorEvents.orderError(phone, 400);
+                }
+                
+                console.log('Order confirmation result:', result);
+            } catch (error) {
+                console.error('Order confirmation error:', error);
+                await errorEvents.orderError(phone, error.response?.status || 500);
+            }
         }
 
         // Always return 200 to acknowledge webhook receipt
         return res.status(200).json({
             status: 'success',
-            message: 'Webhook processed'
+            message: 'Webhook processed',
         });
 
     } catch (error) {
