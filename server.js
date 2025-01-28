@@ -6,6 +6,7 @@ const logger = require('morgan');
 const { get_started, handle_home_menu, handle_decline, product_detail, initialize_user, store_user_data, fetch_user_data, next_address, create_woocommerce_order, get_post_office_info, order_confirmation, address, fetch_order_status, enter_order_id, pincode, payment_request } = require('./utility/ecom');
 const { paymentEvents, systemEvents, errorEvents } = require('./utility/event_handler');
 const { catalog } = require('./utility/all_product_catalog');
+const { initializeLogger, logError, logAPICall, logEvent, logMessage, logSuccess, MESSAGE_TYPES } = require('./utility/logger');
 
 // Suppress all CryptographyDeprecationWarnings
 // process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -79,13 +80,47 @@ async function initializeDb() {
     }
 }
 
+// Add after MongoDB Initialization
+initializeLogger().then(() => {
+    console.log('Logger initialized');
+}).catch(err => {
+    console.error('Logger initialization failed:', err);
+});
+
 app.post('/webhook', async (req, res) => {
+    const startTime = Date.now();
     try {
+        const recipient_id = req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
+        
+        // Log incoming message
+        if (req.body?.entry?.[0]?.changes?.[0]?.value?.messages) {
+            const message = req.body.entry[0].changes[0].value.messages[0];
+            await logMessage({
+                type: MESSAGE_TYPES.INCOMING,
+                recipient_id,
+                content: message.text?.body || message.interactive || message.order,
+                message_type: message.type,
+                interactive_type: message.interactive?.type,
+                processing_time: Date.now() - startTime,
+                session_id: `${recipient_id}-${Date.now()}`
+            });
+        }
+
+        // Log the incoming webhook
+        await logAPICall({
+            endpoint: '/webhook',
+            method: 'POST',
+            requestData: req.body,
+            recipient_id: req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id,
+            metadata: {
+                headers: req.headers
+            }
+        });
+
         console.log("Webhook POST request received");
         const reqBody = req.body;
         console.log(`Request JSON: ${JSON.stringify(reqBody, null, 2)}`);
 
-        const recipient_id = reqBody?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
         const user_name = reqBody?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name || 'Customer';
 
         // Add validation for message structure
@@ -271,6 +306,19 @@ app.post('/webhook', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'Invalid entry structure' });
     } catch (error) {
         const recipient_id = req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
+        await logError(error, {
+            type: 'WEBHOOK_ERROR',
+            recipient_id,
+            statusCode: error.response?.status,
+            whatsappCode: error.response?.data?.error?.code,
+            endpoint: '/webhook',
+            requestData: req.body,
+            responseData: error.response?.data,
+            metadata: {
+                duration: Date.now() - startTime
+            }
+        });
+
         if (recipient_id) {
             await errorEvents.networkError(recipient_id, 'server');
         }
@@ -279,68 +327,112 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.post('/order_status', async (req, res) => {
-    console.log("\n=== WooCommerce Webhook Received ===");
-    console.log("Headers:", req.headers);
-    console.log("Webhook Data:", JSON.stringify(req.body, null, 2));
-    
+    const startTime = Date.now();
     try {
-        const data = req.body;
+        const recipient_id = req.body?.billing?.phone;
         
-        if (!data) {
-            console.log("No webhook data received");
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'No data received' 
-            });
-        }
-
-        // Extract phone number from meta_data if available, otherwise use billing phone
-        let phone = data.meta_data?.find(meta => meta.key === 'whatsapp_number')?.value 
-            || data.billing?.phone 
-            || '';
-
-        // Ensure phone number starts with country code
-        if (phone && !phone.startsWith('91')) {
-            phone = '91' + phone;
-        }
-
-        let status = data.status;
-        // Map status if needed
-        if (status === 'arrival-shipment') {
-            status = 'shipped';
-        }
-
-        // Only proceed with order confirmation if we have the necessary data
-        if (phone && data.id) {
-            try {
-                const result = await order_confirmation(
-                    phone,
-                    data.billing?.first_name || 'Customer',
-                    data.total || '0.00',
-                    data.status || 'processing',
-                    data.id
-                );
-
-                if (!result.success) {
-                    await errorEvents.orderError(phone, 400);
-                }
-                
-                console.log('Order confirmation result:', result);
-            } catch (error) {
-                console.error('Order confirmation error:', error);
-                await errorEvents.orderError(phone, error.response?.status || 500);
+        await logSuccess({
+            recipient_id,
+            action: 'ORDER_STATUS_UPDATED',
+            details: {
+                order_id: req.body.id,
+                status: req.body.status,
+                total: req.body.total
+            },
+            processing_time: Date.now() - startTime,
+            metadata: {
+                webhook_source: 'WooCommerce',
+                timestamp: new Date()
             }
-        }
-
-        // Always return 200 to acknowledge webhook receipt
-        return res.status(200).json({
-            status: 'success',
-            message: 'Webhook processed',
         });
 
+        await logEvent({
+            name: 'ORDER_STATUS_UPDATE',
+            level: 'INFO',
+            recipient_id: req.body?.billing?.phone,
+            description: `Order status updated to ${req.body?.status}`,
+            data: req.body
+        });
+
+        console.log("\n=== WooCommerce Webhook Received ===");
+        console.log("Headers:", req.headers);
+        console.log("Webhook Data:", JSON.stringify(req.body, null, 2));
+        
+        try {
+            const data = req.body;
+            
+            if (!data) {
+                console.log("No webhook data received");
+                return res.status(400).json({ 
+                    status: 'error', 
+                    message: 'No data received' 
+                });
+            }
+
+            // Extract phone number from meta_data if available, otherwise use billing phone
+            let phone = data.meta_data?.find(meta => meta.key === 'whatsapp_number')?.value 
+                || data.billing?.phone 
+                || '';
+
+            // Ensure phone number starts with country code
+            if (phone && !phone.startsWith('91')) {
+                phone = '91' + phone;
+            }
+
+            let status = data.status;
+            // Map status if needed
+            if (status === 'arrival-shipment') {
+                status = 'shipped';
+            }
+
+            // Only proceed with order confirmation if we have the necessary data
+            if (phone && data.id) {
+                try {
+                    const result = await order_confirmation(
+                        phone,
+                        data.billing?.first_name || 'Customer',
+                        data.total || '0.00',
+                        data.status || 'processing',
+                        data.id
+                    );
+
+                    if (!result.success) {
+                        await errorEvents.orderError(phone, 400);
+                    }
+                    
+                    console.log('Order confirmation result:', result);
+                } catch (error) {
+                    console.error('Order confirmation error:', error);
+                    await errorEvents.orderError(phone, error.response?.status || 500);
+                }
+            }
+
+            // Always return 200 to acknowledge webhook receipt
+            return res.status(200).json({
+                status: 'success',
+                message: 'Webhook processed',
+            });
+
+        } catch (error) {
+            console.error('Webhook processing error:', error);
+            // Still return 200 to acknowledge receipt
+            return res.status(200).json({
+                status: 'warning',
+                message: 'Webhook received but processing failed'
+            });
+        }
     } catch (error) {
-        console.error('Webhook processing error:', error);
-        // Still return 200 to acknowledge receipt
+        await logError(error, {
+            type: 'ORDER_STATUS_ERROR',
+            recipient_id: req.body?.billing?.phone,
+            statusCode: error.response?.status,
+            endpoint: '/order_status',
+            requestData: req.body,
+            responseData: error.response?.data,
+            metadata: {
+                duration: Date.now() - startTime
+            }
+        });
         return res.status(200).json({
             status: 'warning',
             message: 'Webhook received but processing failed'

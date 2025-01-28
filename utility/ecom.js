@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const uuid = require('uuid');
 const { URLSearchParams } = require('url');
 const { errorEvents } = require('./event_handler');
+const { logSuccess, logMessage, MESSAGE_TYPES } = require('./logger');
 
 dotenv.config();
 
@@ -62,6 +63,7 @@ function fetch_user_data(recipient_id, key) {
 }
 
 async function get_started(recipient_id, user_name) {
+    const startTime = Date.now();
     const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
     const headers = {
         'Authorization': `Bearer ${access_token}`,
@@ -104,6 +106,26 @@ async function get_started(recipient_id, user_name) {
     try {
         const response = await axios.post(url, data, { headers });
         if (response.status === 200) {
+            await logSuccess({
+                recipient_id,
+                action: 'GET_STARTED_SENT',
+                details: {
+                    user_name,
+                    message_id: response.data.messages[0].id
+                },
+                processing_time: Date.now() - startTime
+            });
+
+            await logMessage({
+                type: MESSAGE_TYPES.OUTGOING,
+                recipient_id,
+                content: data,
+                message_type: 'interactive',
+                interactive_type: 'button',
+                status: 'sent',
+                processing_time: Date.now() - startTime
+            });
+
             console.log('Message sent successfully!');
             return { status: 'success', message: 'Message sent successfully!' };
         } else {
@@ -579,21 +601,21 @@ async function payment_request(recipient_id, current_address) {
         if (!collection) {
             await initializeDb();
         }
-        
+
         // Get all addresses from DB
         const document = await collection.findOne({ recipient_id });
         const all_addresses = document?.shipping_addresses || [];
-        
+
         // Get only the last 3 addresses for display
         const recent_addresses = all_addresses.slice(-3);
-        
+
         console.log('Payment Request - All saved addresses:', all_addresses);
         console.log('Payment Request - Recent addresses to show:', recent_addresses);
         console.log('Payment Request - Current address:', current_address);
 
         // If a new address is being added, use it
         const address_to_use = current_address;
-        
+
         // Store the current address as selected
         await collection.updateOne(
             { recipient_id },
