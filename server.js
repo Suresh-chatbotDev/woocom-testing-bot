@@ -1,14 +1,14 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const { MongoClient, Code } = require('mongodb');
+const { MongoClient } = require('mongodb');
 const dotenv = require('dotenv');
 const logger = require('morgan');
-const { get_started, product_detail, initialize_user, store_user_data, fetch_user_data, next_address, create_woocommerce_order, get_post_office_info, order_confirmation, address, fetch_order_status, enter_order_id, pincode, payment_request } = require('./utility/ecom');
+const { get_started, handle_home_menu, handle_decline, product_detail, initialize_user, store_user_data, fetch_user_data, next_address, create_woocommerce_order, get_post_office_info, order_confirmation, address, fetch_order_status, enter_order_id, pincode, payment_request } = require('./utility/ecom');
 const { paymentEvents, systemEvents, errorEvents } = require('./utility/event_handler');
 const { catalog } = require('./utility/all_product_catalog');
 
 // Suppress all CryptographyDeprecationWarnings
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+// process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // Configure logging
 const app = express();
@@ -60,7 +60,7 @@ let collection; // This will hold the MongoDB collection reference
 async function initializeDb() {
     let client;
     try {
-        client = new MongoClient(MONGO_URL, { useNewUrlParser: true, useUnifiedTopology: true });
+        client = new MongoClient(MONGO_URL);
         await client.connect();
         console.log('MongoDB connected');
         const db = client.db("Ecommerce");
@@ -85,6 +85,9 @@ app.post('/webhook', async (req, res) => {
         const reqBody = req.body;
         console.log(`Request JSON: ${JSON.stringify(reqBody, null, 2)}`);
 
+        const recipient_id = reqBody?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
+        const user_name = reqBody?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name || 'Customer';
+
         // Add validation for message structure
         if (!reqBody?.entry?.[0]?.changes?.[0]?.value) {
             const recipient_id = reqBody?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
@@ -104,7 +107,6 @@ app.post('/webhook', async (req, res) => {
                 if (value.messages && value.messages.length > 0) {
                     const messages = value.messages;
                     const message = messages[0];
-                    const recipient_id = value.contacts[0].wa_id;
                     console.log(`Message received from recipient: ${recipient_id}`);
 
                     if (message.text) {
@@ -116,7 +118,7 @@ app.post('/webhook', async (req, res) => {
                             return res.json(await fetch_order_status(order_id, recipient_id));
                         } else {
                             await initialize_user(recipient_id);
-                            return res.json(await get_started(recipient_id));
+                            return res.json(await get_started(recipient_id, user_name));
                         }
                     } else if (message.interactive) {
                         console.log("Interactive message detected");
@@ -126,7 +128,7 @@ app.post('/webhook', async (req, res) => {
                             const title = interactive.button_reply.title;
                             console.log(`Button title: ${title}`);
                             
-                            if (title === "Get Started") {
+                            if (title === "Get Started 🚀") {
                                 return res.json(await catalog(recipient_id));
                             } else if (title === "Continue") {
                                 try {
@@ -152,13 +154,15 @@ app.post('/webhook', async (req, res) => {
                                 }
                             }                    
                             else if (title === "Decline") {
-                                return res.json(await get_started(recipient_id));
+                                return res.json(await handle_decline(recipient_id));
                             } else if (title === "Add more items") {
                                 return res.json(await catalog(recipient_id));
                             } else if (title === "Home Menu") {
-                                return res.json(await get_started(recipient_id));
-                            } else if (title === "Track Order") {
+                                return res.json(await handle_home_menu(recipient_id));
+                            } else if (title === "Track Order 📦") {
                                 return res.json(await enter_order_id(recipient_id));
+                            } else if (title === "Select Products 🛒") {
+                                return res.json(await catalog(recipient_id));
                             }
                         }
 

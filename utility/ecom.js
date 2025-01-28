@@ -21,7 +21,7 @@ let collection;
 // MongoDB Initialization
 async function initializeDb() {
     try {
-        const client = new MongoClient(MONGO_URL, { useNewUrlParser: true, useUnifiedTopology: true });
+        const client = new MongoClient(MONGO_URL);
         await client.connect();  // Ensure connection is established
         console.log('From Ecom.js ----- MongoDB connected');
         const db = client.db("Ecommerce");
@@ -61,12 +61,16 @@ function fetch_user_data(recipient_id, key) {
     return user_data[recipient_id] ? user_data[recipient_id][key] : null;
 }
 
-async function get_started(recipient_id) {
+async function get_started(recipient_id, user_name) {
     const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
     const headers = {
         'Authorization': `Bearer ${access_token}`,
         'Content-Type': 'application/json'
     };
+
+    // Get first name only (if you want to use just the first name)
+    const first_name = user_name.split(' ')[0];
+
     const data = {
         "messaging_product": "whatsapp",
         "to": recipient_id,
@@ -74,22 +78,22 @@ async function get_started(recipient_id) {
         "interactive": {
             "type": "button",
             "body": {
-                "text": `Welcome to the fast and easy shopping experience with ABC e-commerce on WhatsApp!\n\nI can assist in shopping for your favourite items, click on the below button to begin🙂`
-            },
+                "text": `👋 Welcome aboard, *${first_name}!* 🌟\n\n Thank you for choosing ABC e-commerce. Your seamless shopping journey starts right here on WhatsApp.\n\n Let's find something special for you today! 🎁`
+    },
             "action": {
                 "buttons": [
                     {
                         "type": "reply",
                         "reply": {
                             "id": "proceed_id",
-                            "title": "Get Started"
+                            "title": "Get Started 🚀"
                         }
                     },
                     {
                         "type": "reply",
                         "reply": {
                             "id": "track_id",
-                            "title": "Track Order"
+                            "title": "Track Order 📦"
                         }
                     }
                 ]
@@ -113,6 +117,108 @@ async function get_started(recipient_id) {
     }
 }
 
+// New functions to handle "Decline" and "Home Menu" buttons
+async function handle_decline(recipient_id) {
+    const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
+    const headers = {
+        'Authorization': `Bearer ${access_token}`,
+        'Content-Type': 'application/json'
+    };
+    const data = {
+        "messaging_product": "whatsapp",
+        "to": recipient_id,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": "No worries! How can we assist you further? Please choose an option below: 👇"
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "select_products",
+                            "title": "Select Products 🛒"
+                        }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "track_order",
+                            "title": "Track Order 📦"
+                        }
+                    }
+                ]
+            }
+        }
+    };
+    try {
+        const response = await axios.post(url, data, { headers });
+        if (response.status === 200) {
+            console.log('Decline response sent successfully!');
+            return { status: 'success', message: 'Decline response sent successfully!' };
+        } else {
+            const error_message = `Failed to send decline response: ${response.status}, ${response.data}`;
+            console.error(error_message);
+            return { status: 'error', message: error_message, status_code: response.status };
+        }
+    } catch (error) {
+        await errorEvents.networkError(recipient_id, 'connection');
+        return { status: 'error', message: 'Failed to send decline response' };
+    }
+}
+async function handle_home_menu(recipient_id) {
+    const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
+    const headers = {
+        'Authorization': `Bearer ${access_token}`,
+        'Content-Type': 'application/json'
+    };
+    const data = {
+        "messaging_product": "whatsapp",
+        "to": recipient_id,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": "Welcome back! How can we assist you today? Please choose an option below: 👇"
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "select_products",
+                            "title": "Select Products 🛒"
+                        }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "track_order",
+                            "title": "Track Order 📦"
+                        }
+                    }
+                ]
+            }
+        }
+    };
+    try {
+        const response = await axios.post(url, data, { headers });
+        if (response.status === 200) {
+            console.log('Home menu response sent successfully!');
+            return { status: 'success', message: 'Home menu response sent successfully!' };
+        } else {
+            const error_message = `Failed to send home menu response: ${response.status}, ${response.data}`;
+            console.error(error_message);
+            return { status: 'error', message: error_message, status_code: response.status };
+        }
+    } catch (error) {
+        await errorEvents.networkError(recipient_id, 'connection');
+        return { status: 'error', message: 'Failed to send home menu response' };
+    }
+}
+
 async function enter_order_id(recipient_id) {
     const url = `https://graph.facebook.com/v21.0/${phone_number_id}/messages`;
     const headers = {
@@ -124,7 +230,7 @@ async function enter_order_id(recipient_id) {
         "to": recipient_id,
         "type": "text",
         "text": {
-            "body": "Please enter your Order Id."
+            "body": "🔢 Please enter your Order ID."
         }
     };
 
@@ -723,19 +829,19 @@ async function order_confirmation(phone, first_name, total_amount, status, order
 // async function sendSMSConfirmation(phone, first_name, total_amount, status, order_id) {
 //     console.log("Attempting to send SMS confirmation message");
     
-//     // Remove any WhatsApp specific formatting from the phone number
+     // Remove any WhatsApp specific formatting from the phone number
 //     const cleanPhone = phone.replace('whatsapp:', '');
     
-//     // Create a simple SMS message without emojis and formatting
+    // Create a simple SMS message without emojis and formatting
 //     const message = `Order Confirmation: Hello ${first_name}, thank you for your order #${order_id}. Status: ${status}. Total Amount: Rs.${total_amount}. We're preparing your order and will notify you when it's on the way. Need help? Contact our support.`;
 
 //     try {
-//         // Using a hypothetical SMS service (you'll need to replace with your actual SMS provider)
-//         // Example using Twilio
+         // Using a hypothetical SMS service (you'll need to replace with your actual SMS provider)
+         // Example using Twilio
 //         const response = await axios.post('YOUR_SMS_API_ENDPOINT', {
 //             to: cleanPhone,
 //             message: message,
-//             // Add any other required parameters for your SMS provider
+             // Add any other required parameters for your SMS provider
 //         }, {
 //             headers: {
 //                 'Authorization': `Bearer ${sms_api_key}`, // Your SMS provider API key
@@ -751,7 +857,7 @@ async function order_confirmation(phone, first_name, total_amount, status, order
 //             timestamp: new Date().toISOString()
 //         };
 
-//     } catch (error) {
+         //     } catch (error) {
 //         console.error("SMS sending error:", error.response?.data || error);
 //         return {
 //             success: false,
@@ -771,14 +877,14 @@ async function order_confirmation(phone, first_name, total_amount, status, order
 //     console.log("Input Parameters:", { phone, first_name, total_amount, status, order_id });
 
 //     try {
-//         // Validate input parameters
+         // Validate input parameters
 //         if (!phone || !first_name || !total_amount || !status || !order_id) {
 //             throw new Error("Missing required parameters");
 //         }
 
 //         let isInactiveUser = false;
         
-//         // First try sending regular WhatsApp confirmation
+        // First try sending regular WhatsApp confirmation
 //         try {
 //             console.log("Attempting regular WhatsApp confirmation message first...");
 //             const regularResult = await sendRegularConfirmation(phone, first_name, total_amount, status, order_id);
@@ -789,7 +895,7 @@ async function order_confirmation(phone, first_name, total_amount, status, order
 //         } catch (regularError) {
 //             console.log("Regular WhatsApp confirmation failed:", regularError.response?.data?.error || regularError);
             
-//             // Check if user is inactive
+             // Check if user is inactive
 //             if (regularError.response?.data?.error?.code === 131047) {
 //                 isInactiveUser = true;
 //                 console.log("User is inactive. Attempting template message...");
@@ -814,14 +920,14 @@ async function order_confirmation(phone, first_name, total_amount, status, order
 //             }
 //         }
 
-//         // If user is inactive and all WhatsApp attempts failed, try SMS
+        // If user is inactive and all WhatsApp attempts failed, try SMS
 //         if (isInactiveUser) {
 //             console.log("All WhatsApp attempts failed for inactive user. Attempting SMS fallback...");
 //             const smsResult = await sendSMSConfirmation(phone, first_name, total_amount, status, order_id);
 //             return smsResult;
 //         }
 
-//         // If user is active but WhatsApp failed, try regular WhatsApp one last time
+        // If user is active but WhatsApp failed, try regular WhatsApp one last time
 //         console.log("All attempts failed. Sending regular WhatsApp message as final attempt...");
 //         return await sendRegularConfirmation(phone, first_name, total_amount, status, order_id);
 
@@ -1106,7 +1212,7 @@ async function sendRegularConfirmation(phone, first_name, total_amount, status, 
                         type: "reply",
                         reply: {
                             id: "track_order",
-                            title: "Track Order"
+                            title: "Track Order 📦"
                         }
                     }
                 ]
@@ -1539,6 +1645,8 @@ module.exports = {
     update_mongo_user_data,
     fetch_user_data,
     get_started,
+    handle_home_menu,
+    handle_decline,
     enter_order_id,
     fetch_order_status,
     fetch_product_data,
