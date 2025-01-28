@@ -96,19 +96,34 @@ async function logError(error, context = {}) {
 async function logAPICall(apiDetails) {
     if (!logsCollection) await initializeLogger();
 
+    const startTime = apiDetails.startTime || Date.now();
+    const endTime = Date.now();
+
     const apiLog = {
         level: 'INFO',
         timestamp: new Date(),
         type: 'API_CALL',
         endpoint: apiDetails.endpoint,
         method: apiDetails.method,
-        duration: apiDetails.duration,
-        status_code: apiDetails.statusCode,
-        status_text: HTTP_STATUS_CODES[apiDetails.statusCode],
-        recipient_id: apiDetails.recipient_id,
-        request_data: apiDetails.requestData,
-        response_data: apiDetails.responseData,
-        metadata: apiDetails.metadata || {}
+        duration: endTime - startTime,
+        status_code: apiDetails.statusCode || 200, // Default to 200 if successful
+        status_text: HTTP_STATUS_CODES[apiDetails.statusCode] || 'OK',
+        recipient_id: extractRecipientId(apiDetails.requestData),
+        request_data: sanitizeRequestData(apiDetails.requestData),
+        response_data: apiDetails.responseData || { status: 'processed' },
+        conversation_id: generateConversationId(apiDetails.requestData),
+        metadata: {
+            ...apiDetails.metadata,
+            processing_details: {
+                start_time: new Date(startTime),
+                end_time: new Date(endTime),
+                duration_ms: endTime - startTime
+            },
+            message_type: determineMessageType(apiDetails.requestData),
+            business_account: extractBusinessDetails(apiDetails.requestData),
+            request_source: apiDetails.metadata?.headers?.['user-agent'] || 'Unknown',
+            api_version: extractApiVersion(apiDetails.endpoint)
+        }
     };
 
     try {
@@ -116,6 +131,77 @@ async function logAPICall(apiDetails) {
     } catch (logError) {
         console.error('Failed to log API call:', logError);
     }
+}
+
+// Helper functions to extract and process data
+function extractRecipientId(requestData) {
+    try {
+        return requestData?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id ||
+               requestData?.entry?.[0]?.changes?.[0]?.value?.statuses?.[0]?.recipient_id ||
+               'unknown';
+    } catch (error) {
+        return 'unknown';
+    }
+}
+
+function sanitizeRequestData(requestData) {
+    if (!requestData) return null;
+
+    // Deep clone to avoid modifying original data
+    const sanitized = JSON.parse(JSON.stringify(requestData));
+
+    // Add missing fields with default values
+    if (sanitized.entry?.[0]?.changes?.[0]?.value) {
+        const value = sanitized.entry[0].changes[0].value;
+        value.messaging_product = value.messaging_product || 'whatsapp';
+        value.metadata = value.metadata || {
+            display_phone_number: process.env.DISPLAY_PHONE_NUMBER,
+            phone_number_id: process.env.PHONE_NUMBER_ID
+        };
+    }
+
+    return sanitized;
+}
+
+function generateConversationId(requestData) {
+    try {
+        return requestData?.entry?.[0]?.changes?.[0]?.value?.statuses?.[0]?.conversation?.id ||
+               `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    } catch (error) {
+        return `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+}
+
+function determineMessageType(requestData) {
+    try {
+        const value = requestData?.entry?.[0]?.changes?.[0]?.value;
+        if (value?.messages) return 'incoming_message';
+        if (value?.statuses) return 'status_update';
+        return 'unknown';
+    } catch (error) {
+        return 'unknown';
+    }
+}
+
+function extractBusinessDetails(requestData) {
+    try {
+        return {
+            account_id: requestData?.entry?.[0]?.id || 'unknown',
+            phone_number: requestData?.entry?.[0]?.changes?.[0]?.value?.metadata?.display_phone_number || 'unknown',
+            phone_number_id: requestData?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id || 'unknown'
+        };
+    } catch (error) {
+        return {
+            account_id: 'unknown',
+            phone_number: 'unknown',
+            phone_number_id: 'unknown'
+        };
+    }
+}
+
+function extractApiVersion(endpoint) {
+    const versionMatch = endpoint?.match(/v\d+\.\d+/) || ['v21.0'];
+    return versionMatch[0];
 }
 
 async function logEvent(eventDetails) {
@@ -151,12 +237,29 @@ async function logMessage(messageDetails) {
             content: messageDetails.content,
             message_type: messageDetails.message_type,
             interactive_type: messageDetails.interactive_type,
-            status: messageDetails.status
+            status: messageDetails.status || 'sent',
+            direction: messageDetails.type === MESSAGE_TYPES.INCOMING ? 'received' : 'sent'
+        },
+        conversation: {
+            id: messageDetails.session_id || `session_${Date.now()}`,
+            status: 'active',
+            expiration: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
+            origin: {
+                type: messageDetails.origin_type || 'user_initiated'
+            }
+        },
+        pricing: {
+            billable: true,
+            pricing_model: 'CBP',
+            category: determinePricingCategory(messageDetails)
         },
         metadata: {
             session_id: messageDetails.session_id,
             timestamp: new Date(),
-            processing_time: messageDetails.processing_time
+            processing_time: messageDetails.processing_time,
+            platform: 'WhatsApp Business API',
+            client_info: messageDetails.client_info || {},
+            message_status: messageDetails.status || 'delivered'
         }
     };
 
@@ -165,6 +268,12 @@ async function logMessage(messageDetails) {
     } catch (logError) {
         console.error('Failed to log message:', logError);
     }
+}
+
+function determinePricingCategory(messageDetails) {
+    if (messageDetails.type === MESSAGE_TYPES.INCOMING) return 'user_initiated';
+    if (messageDetails.message_type === 'template') return 'utility';
+    return 'service';
 }
 
 async function logSuccess(successDetails) {
@@ -224,5 +333,8 @@ module.exports = {
     WHATSAPP_ERROR_CODES,
     logMessage,
     logSuccess,
-    MESSAGE_TYPES
+    MESSAGE_TYPES,
+    extractRecipientId,
+    sanitizeRequestData,
+    generateConversationId
 };
