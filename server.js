@@ -249,7 +249,6 @@ app.post('/webhook', async (req, res) => {
                             try {
                                 const amount = status.payment?.amount || { value: '0', offset: '100' };
                                 
-                                // Add strict payment status validation
                                 if (!status.payment?.transaction?.status) {
                                     console.error('Payment status missing');
                                     await errorEvents.paymentError(recipient_id, 400);
@@ -257,51 +256,81 @@ app.post('/webhook', async (req, res) => {
                                 }
 
                                 if (status.payment?.transaction?.status === 'success') {
-                                    // Calculate amount correctly
-                                    const formattedAmount = parseInt(amount.value) / parseInt(amount.offset);
-                                    
-                                    // Validate transaction ID exists
-                                    if (!status.payment?.transaction?.id) {
-                                        console.error('Transaction ID missing');
-                                        await errorEvents.paymentError(recipient_id, 400);
-                                        return res.status(400).json({ error: 'Missing transaction ID' });
-                                    }
-
-                                    // Log payment success
-                                    await paymentEvents.success(recipient_id, formattedAmount);
-                                    
                                     try {
+                                        // Debug transaction details
+                                        console.log('Payment Transaction Details:', {
+                                            transactionId: status.payment.transaction.id,
+                                            status: status.payment.transaction.status,
+                                            method: status.payment.transaction.method,
+                                            raw: status.payment.transaction // Log complete transaction object
+                                        });
+
+                                        const formattedAmount = parseInt(amount.value) / parseInt(amount.offset);
+                                        
+                                        // Validate transaction ID format
+                                        if (!status.payment?.transaction?.id || typeof status.payment.transaction.id !== 'string') {
+                                            console.error('Invalid Transaction ID:', status.payment?.transaction?.id);
+                                            await errorEvents.paymentError(recipient_id, 400);
+                                            return res.status(400).json({ error: 'Invalid transaction ID format' });
+                                        }
+
+                                        // Send payment success notification with validated transaction ID
+                                        const paymentNotification = await paymentEvents.success(recipient_id, {
+                                            amount: formattedAmount,
+                                            currency: 'INR',
+                                            transactionId: status.payment.transaction.id.trim(), // Ensure clean transaction ID
+                                            paymentMethod: status.payment.transaction.method.type,
+                                            timestamp: new Date().toISOString()
+                                        });
+
+                                        // Log success event
+                                        await logSuccess({
+                                            recipient_id,
+                                            action: 'PAYMENT_SUCCESS',
+                                            details: {
+                                                amount: formattedAmount,
+                                                transaction_id: status.payment.transaction.id,
+                                                payment_method: status.payment.transaction.method.type
+                                            }
+                                        });
+
                                         const shipping_address = status.payment.shipping_info.shipping_address;
                                         if (!shipping_address) {
                                             throw new Error('Shipping address missing');
                                         }
 
+                                        // Store payment and shipping information
                                         await store_user_data(recipient_id, 'selected_address', shipping_address);
-                                        
-                                        // Store complete payment information
-                                        const payment_info = {
+                                        await store_user_data(recipient_id, 'Payments Info', {
                                             payment_status: 'success',
                                             transaction_id: status.payment.transaction.id,
                                             payment_method: status.payment.transaction.method.type,
                                             transaction_status: 'Paid',
-                                            payment_timestamp: new Date().toISOString()
-                                        };
-                                        
-                                        await store_user_data(recipient_id, 'Payments Info', payment_info);
-                                        
-                                        // Create WooCommerce order only after payment confirmation
+                                            payment_timestamp: new Date().toISOString(),
+                                            amount: formattedAmount
+                                        });
+
+                                        // Create WooCommerce order
                                         try {
                                             const order = await create_woocommerce_order(recipient_id);
-                                            return res.json(order);
+                                            console.log('WooCommerce order created:', order);
+                                            return res.json({
+                                                success: true,
+                                                order: order,
+                                                payment: paymentNotification
+                                            });
                                         } catch (orderError) {
                                             console.error('Order creation error:', orderError);
                                             await errorEvents.orderError(recipient_id, orderError.response?.status || 500);
-                                            return res.status(500).json({ error: 'Order creation failed' });
+                                            throw orderError;
                                         }
-                                    } catch (dataError) {
-                                        console.error('Data processing error:', dataError);
-                                        await errorEvents.orderError(recipient_id, 400);
-                                        return res.status(400).json({ error: 'Data processing failed' });
+                                    } catch (error) {
+                                        console.error('Payment processing error:', error);
+                                        await errorEvents.paymentError(recipient_id, error.response?.status || 500);
+                                        return res.status(500).json({ 
+                                            error: 'Payment processing failed',
+                                            details: error.message 
+                                        });
                                     }
                                 } else {
                                     console.error(`Payment failed with status: ${status.payment?.transaction?.status}`);

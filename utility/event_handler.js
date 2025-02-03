@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const META_API_URL = process.env.meta_api_url;
 const ACCESS_TOKEN = process.env.meta_access_token;
+const phone_number_id = process.env.phone_number_id;
 
 // Simplify message templates - remove unused ones
 const messageTemplates = {
@@ -101,13 +102,81 @@ const orderEvents = {
 };
 
 const paymentEvents = {
-    async success(recipient_id, amount) {
-        return sendUserNotification(
-            recipient_id,
-            `Payment of ₹${amount} received successfully! Processing your order.`,
-            'success'
-        );
+    async success(recipient_id, paymentDetails) {
+        try {
+            // Validate transaction ID
+            if (!paymentDetails.transactionId) {
+                throw new Error('Missing transaction ID');
+            }
+
+            // Log payment details for debugging
+            console.log('Payment Success Details:', {
+                recipientId: recipient_id,
+                amount: paymentDetails.amount,
+                transactionId: paymentDetails.transactionId,
+                method: paymentDetails.paymentMethod,
+                timestamp: paymentDetails.timestamp
+            });
+
+            const message = `🎉 *Payment Successful!*\n\n` +
+                `Thank you for your payment of ₹${paymentDetails.amount}.\n\n` +
+                `📋 *Transaction Details:*\n` +
+                `- Transaction ID: *${paymentDetails.transactionId}*\n` + // Made transaction ID bold
+                `- Payment Method: ${paymentDetails.paymentMethod}\n` +
+                `- Date: ${new Date().toLocaleDateString('en-IN')}\n\n` +
+                `We're now preparing your order. You'll receive an order confirmation shortly!\n\n` +
+                `Thank you for shopping with us! 🛍️`;
+
+            const response = await axios.post(META_API_URL, {
+                messaging_product: "whatsapp",
+                to: recipient_id,
+                type: "text",
+                text: { body: message }
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            // Verify WhatsApp API response
+            if (!response.data?.messages?.[0]?.id) {
+                console.error('Invalid WhatsApp API response:', response.data);
+                throw new Error('Invalid WhatsApp API response');
+            }
+
+            // Store transaction details in logs
+            await logSuccess({
+                recipient_id,
+                action: 'PAYMENT_NOTIFICATION_SENT',
+                details: {
+                    transactionId: paymentDetails.transactionId,
+                    amount: paymentDetails.amount,
+                    messageId: response.data.messages[0].id
+                },
+                timestamp: new Date().toISOString()
+            });
+
+            return {
+                success: true,
+                message_id: response.data.messages[0].id,
+                transactionId: paymentDetails.transactionId,
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('Payment success notification error:', {
+                error: error.message,
+                recipientId: recipient_id,
+                details: error.response?.data
+            });
+            return {
+                success: false,
+                error: error.message,
+                timestamp: new Date().toISOString()
+            };
+        }
     }
+    // ...existing code...
 };
 
 module.exports = {
