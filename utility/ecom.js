@@ -1281,6 +1281,12 @@ async function create_woocommerce_order(recipient_id) {
             throw new Error('MongoDB collection is not initialized.');
         }
 
+        // Verify payment status first
+        const isPaymentVerified = await verifyPaymentStatus(recipient_id);
+        if (!isPaymentVerified) {
+            throw new Error('Payment not verified');
+        }
+
         // Fetch all required data
         const order_items = fetch_user_data(recipient_id, 'order_info');
         const selected_address = fetch_user_data(recipient_id, 'selected_address');
@@ -1353,11 +1359,11 @@ async function create_woocommerce_order(recipient_id) {
     } catch (error) {
         console.error('Error creating WooCommerce order:', error);
         
-        // Handle specific WooCommerce API errors
-        if (error.response?.status === 401) {
+        // Handle specific errors
+        if (error.message === 'Payment not verified') {
+            await errorEvents.paymentError(recipient_id, 'verification');
+        } else if (error.response?.status === 401) {
             await errorEvents.woocommerceError(recipient_id, 'auth');
-        } else if (error.response?.status === 400) {
-            await errorEvents.validationError(recipient_id, 'order');
         } else {
             await errorEvents.woocommerceError(recipient_id, 'order');
         }
@@ -1660,6 +1666,19 @@ async function get_transaction_details(txnid, recipient_id) {
     }
 }
 
+// Add this new function
+async function verifyPaymentStatus(recipient_id) {
+    const payments_info = fetch_user_data(recipient_id, 'Payments Info');
+    
+    if (!payments_info || 
+        payments_info.payment_status !== 'success' || 
+        !payments_info.transaction_id) {
+        throw new Error('Payment verification failed');
+    }
+    
+    return true;
+}
+
 // Export all functions
 module.exports = {
     initialize_user,
@@ -1686,5 +1705,6 @@ module.exports = {
     cancel_order_confirmation,
     generate_hash,
     refund_transaction,
-    get_transaction_details
+    get_transaction_details,
+    verifyPaymentStatus
 };
