@@ -1,11 +1,11 @@
 // utility/event_handler.js
 const axios = require('axios');
 const dotenv = require('dotenv');
+const { logSuccess, logError, logMessage, MESSAGE_TYPES, logEvent } = require('./logger');
 
 dotenv.config();
 const META_API_URL = process.env.meta_api_url;
 const ACCESS_TOKEN = process.env.meta_access_token;
-const phone_number_id = process.env.phone_number_id;
 
 // Simplify message templates - remove unused ones
 const messageTemplates = {
@@ -87,6 +87,16 @@ const errorEvents = {
     async networkError(recipient_id, type = 'connection') {
         const message = errorMessages.network[type];
         return sendUserNotification(recipient_id, message, 'warning');
+    },
+
+    async timeoutError(recipient_id) {
+        const message = errorMessages.network.timeout;
+        return sendUserNotification(recipient_id, message, 'warning');
+    },
+
+    async woocommerceError(recipient_id, type) {
+        const message = errorMessages[500].order;
+        return sendUserNotification(recipient_id, message, 'error');
     }
 };
 
@@ -176,7 +186,6 @@ const paymentEvents = {
             };
         }
     }
-    // ...existing code...
 };
 
 module.exports = {
