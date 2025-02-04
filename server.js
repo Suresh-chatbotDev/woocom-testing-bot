@@ -271,6 +271,7 @@ app.post('/webhook', async (req, res) => {
                                         currency: 'INR',
                                         transactionId: status.payment.transaction.id.trim(),
                                         paymentMethod: status.payment.transaction.method.type,
+                                        shippingInfo: status.payment.shipping_info.shipping_address,
                                         timestamp: new Date().toISOString()
                                     });
                                     
@@ -287,6 +288,7 @@ app.post('/webhook', async (req, res) => {
                                             payment_status: 'success',
                                             transaction_id: status.payment.transaction.id,
                                             payment_method: status.payment.transaction.method.type,
+                                            shipping_info: status.payment.shipping_info.shipping_address,
                                             transaction_status: 'Paid',
                                             payment_timestamp: new Date().toISOString()
                                         };

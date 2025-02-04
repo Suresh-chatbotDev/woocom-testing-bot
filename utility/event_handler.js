@@ -119,29 +119,37 @@ const paymentEvents = {
                 throw new Error('Missing transaction ID');
             }
 
+            // Check if order is for someone else
+            const orderRecipientPhone = paymentDetails.shippingInfo?.phone;
+            const isOrderingForOther = orderRecipientPhone && orderRecipientPhone !== recipient_id;
+
             // Log payment details for debugging
             console.log('Payment Success Details:', {
-                recipientId: recipient_id,
+                payerId: recipient_id,
+                recipientId: orderRecipientPhone || recipient_id,
                 amount: paymentDetails.amount,
                 transactionId: paymentDetails.transactionId,
                 method: paymentDetails.paymentMethod,
-                timestamp: paymentDetails.timestamp
+                timestamp: paymentDetails.timestamp,
+                isOrderingForOther
             });
 
-            const message = `🎉 *Payment Successful!*\n\n` +
+            // Send payment confirmation to person who paid
+            const payerMessage = `🎉 *Payment Successful!*\n\n` +
                 `Thank you for your payment of ₹${paymentDetails.amount}.\n\n` +
                 `📋 *Transaction Details:*\n` +
-                `- Transaction ID: *${paymentDetails.transactionId}*\n` + // Made transaction ID bold
+                `- Transaction ID: *${paymentDetails.transactionId}*\n` +
                 `- Payment Method: ${paymentDetails.paymentMethod}\n` +
-                `- Date: ${new Date().toLocaleDateString('en-IN')}\n\n` +
-                `We're now preparing your order. You'll receive an order confirmation shortly!\n\n` +
+                `- Date: ${new Date().toLocaleDateString('en-IN')}\n` +
+                (isOrderingForOther ? `- Delivery to: ${orderRecipientPhone}\n` : '') +
+                `\nWe're now preparing your order. You'll receive an order confirmation shortly!\n\n` +
                 `Thank you for shopping with us! 🛍️`;
 
-            const response = await axios.post(META_API_URL, {
+            const payerResponse = await axios.post(META_API_URL, {
                 messaging_product: "whatsapp",
                 to: recipient_id,
                 type: "text",
-                text: { body: message }
+                text: { body: payerMessage }
             }, {
                 headers: {
                     'Authorization': `Bearer ${ACCESS_TOKEN}`,
@@ -149,10 +157,26 @@ const paymentEvents = {
                 }
             });
 
-            // Verify WhatsApp API response
-            if (!response.data?.messages?.[0]?.id) {
-                console.error('Invalid WhatsApp API response:', response.data);
-                throw new Error('Invalid WhatsApp API response');
+            // If order is for someone else, send notification to recipient
+            if (isOrderingForOther) {
+                const recipientMessage = `🎁 *New Order Alert!*\n\n` +
+                    `Hello! An order has been placed for you by ${recipient_id}.\n\n` +
+                    `📋 *Order Details:*\n` +
+                    `- Amount: ₹${paymentDetails.amount}\n` +
+                    `- Date: ${new Date().toLocaleDateString('en-IN')}\n\n` +
+                    `You'll receive order updates on this number. Thank you! 🛍️`;
+
+                await axios.post(META_API_URL, {
+                    messaging_product: "whatsapp",
+                    to: orderRecipientPhone,
+                    type: "text",
+                    text: { body: recipientMessage }
+                }, {
+                    headers: {
+                        'Authorization': `Bearer ${ACCESS_TOKEN}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
             }
 
             // Store transaction details in logs
@@ -162,14 +186,15 @@ const paymentEvents = {
                 details: {
                     transactionId: paymentDetails.transactionId,
                     amount: paymentDetails.amount,
-                    messageId: response.data.messages[0].id
+                    messageId: payerResponse.data.messages[0].id,
+                    orderRecipient: orderRecipientPhone || recipient_id
                 },
                 timestamp: new Date().toISOString()
             });
 
             return {
                 success: true,
-                message_id: response.data.messages[0].id,
+                message_id: payerResponse.data.messages[0].id,
                 transactionId: paymentDetails.transactionId,
                 timestamp: new Date().toISOString()
             };
