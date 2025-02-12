@@ -8,6 +8,8 @@ const { paymentEvents, systemEvents, errorEvents } = require('./utility/event_ha
 const { catalog } = require('./utility/all_product_catalog');
 const { initializeLogger, logError, logAPICall, logEvent, logMessage, logSuccess, MESSAGE_TYPES } = require('./utility/logger');
 
+// Add this at the top with other const declarations
+const processedStatuses = new Set();
 
 // Configure logging
 const app = express();
@@ -88,9 +90,30 @@ initializeLogger().then(() => {
 app.post('/webhook', async (req, res) => {
     const startTime = Date.now();
     try {
+        // Extract recipient_id first for logging
         const recipient_id = req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.wa_id;
         
-        // Log incoming message
+        // Early return for status updates we've already processed
+        const status = req.body?.entry?.[0]?.changes?.[0]?.value?.statuses?.[0];
+        if (status) {
+            const statusId = status.id;
+            if (processedStatuses.has(statusId)) {
+                return res.status(200).json({ status: 'ignored_duplicate' });
+            }
+            processedStatuses.add(statusId);
+            
+            // Clean up old status IDs every 1000 entries
+            if (processedStatuses.size > 1000) {
+                processedStatuses.clear();
+            }
+            
+            // Only process payment statuses, ignore read/sent statuses
+            if (status.type !== 'payment') {
+                return res.status(200).json({ status: 'ignored_status' });
+            }
+        }
+
+        // Log incoming message only if it's an actual message
         if (req.body?.entry?.[0]?.changes?.[0]?.value?.messages) {
             const message = req.body.entry[0].changes[0].value.messages[0];
             await logMessage({
